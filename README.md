@@ -1,28 +1,32 @@
 # git-multi-host-setup
 
-Automated setup for multiple git accounts across multiple hosts (GitHub, GitLab, Gitea, self-hosted, ...) with clean separation of SSH keys, git identity and GPG signing – driven purely by the **project directory** a repo lives in.
+Automated setup for multiple git accounts across multiple hosts (GitHub, GitLab, Gitea, self-hosted, ...) with clean separation of SSH keys, git identity, GPG signing and HTTPS credentials – driven purely by the **project directory** a repo lives in.
 
 ## What the script does
 
 For every account defined in the accounts file, it automatically:
 
-- generates a dedicated **SSH key** (ed25519)
+- generates a dedicated **SSH key** (ed25519) – unless the account is HTTPS-only
 - generates or reuses a dedicated **GPG key** (ed25519/cv25519, no passphrase, valid for 2 years)
 - creates a matching project directory under `~/projects/<folder>`
 - writes a dedicated `~/.gitconfig-<alias>` containing:
   - `user.name` / `user.email`
-  - `core.sshCommand` → automatically uses the right SSH key
   - `user.signingkey`, `commit.gpgsign = true`, `tag.gpgsign = true`
+  - `core.sshCommand` → automatically uses the right SSH key (SSH accounts)
+  - `credential.https://<host>.username` → **only** the username (HTTPS accounts)
 - appends an `includeIf "gitdir:..."` entry to `~/.gitconfig` that loads the right config as soon as you are inside that directory
+- sets a global `credential.helper` (only if none is configured yet) so an HTTPS token typed once is remembered
 
 **No SSH host alias required.** Repos are cloned with the real host URL as usual (e.g. `git@github.com:org/repo.git`) – as long as they end up in the right project directory, the correct SSH key, commit identity and GPG signature apply automatically.
+
+**SSH, HTTPS or both.** Each account chooses its protocol; HTTPS-only accounts get no SSH key at all – see [SSH or HTTPS](#ssh-or-https).
 
 ## Requirements
 
 - `bash`
-- `ssh-keygen` (package `openssh-client`)
-- `gpg` (package `gnupg`)
 - Git ≥ 2.13 (for `includeIf`)
+- `gpg` (package `gnupg`)
+- `ssh-keygen` (package `openssh-client`) – only for SSH accounts
 
 ## Usage
 
@@ -35,17 +39,21 @@ For every account defined in the accounts file, it automatically:
    One line per account, format:
 
    ```
-   alias|hostname|ssh_user|project_folder|git_name|git_email
+   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user]
    ```
 
    | Field | Meaning |
    |---|---|
    | `alias` | internal identifier for the key filename & git config (does not appear in the clone URL) |
    | `hostname` | real hostname, e.g. `github.com` |
-   | `ssh_user` | usually `git` |
+   | `ssh_user` | usually `git`; leave **empty** to disable SSH for this account (HTTPS only) |
    | `project_folder` | relative path under `~/projects`, e.g. `github-work` |
    | `git_name` | name used in commits made in this directory |
    | `git_email` | e-mail used in commits made in this directory |
+   | `https_user` | *optional*: your login name on that host, used for HTTPS remotes. Omit the field for SSH-only accounts. |
+
+   Every account needs at least one of `ssh_user` / `https_user`; the script
+   aborts if both are missing.
 
    Blank lines and lines starting with `#` are ignored.
 
@@ -63,6 +71,15 @@ For every account defined in the accounts file, it automatically:
    PROJECT_BASE=~/code ./setup-git-hosts.sh
    ```
 
+   | Environment variable | Default | Meaning |
+   |---|---|---|
+   | `PROJECT_BASE` | `~/projects` | base directory for the project folders |
+   | `ACCOUNTS_FILE` | `./accounts.conf` | accounts file (same as the first argument) |
+   | `HTTPS_ONLY` | `0` | set to `1` to disable SSH for **all** accounts: no keys are generated, no `core.sshCommand` is written |
+   | `CREDENTIAL_HELPER` | auto-detected | credential helper for HTTPS tokens, e.g. `'cache --timeout=3600'` |
+   | `CREDENTIAL_CACHE_TIMEOUT` | `86400` | timeout in seconds, only used for the `cache` fallback |
+   | `SETUP_CREDENTIAL_HELPER` | `1` | set to `0` to never touch the global `credential.helper` |
+
 2. Run it:
 
    ```bash
@@ -73,6 +90,7 @@ For every account defined in the accounts file, it automatically:
 3. Perform the steps printed at the end:
    - add the SSH public keys to the respective host
    - add the GPG public keys to the respective host (Settings → SSH and GPG keys)
+   - create a personal access token per host if you want to use HTTPS
    - clone repos into the matching directories
 
 4. Verify:
@@ -80,15 +98,95 @@ For every account defined in the accounts file, it automatically:
    ```bash
    cd ~/projects/<folder>/repo
    git config user.email
-   git config core.sshCommand
    git config user.signingkey
+   git config core.sshCommand                          # SSH accounts only
+   git config credential.https://github.com.username   # HTTPS accounts only
    git commit --allow-empty -m "test"
    git log --show-signature -1
    ```
 
+## SSH or HTTPS
+
+The project directory decides which identity is used, not the protocol. Each account picks its protocols itself:
+
+| Account line | Effect |
+|---|---|
+| `alias\|github.com\|git\|folder\|Name\|mail\|handle` | SSH **and** HTTPS |
+| `alias\|github.com\|git\|folder\|Name\|mail` | SSH only – no HTTPS username |
+| `alias\|github.com\|\|folder\|Name\|mail\|handle` | **HTTPS only** – `ssh_user` empty, so no SSH key is generated and no `core.sshCommand` is written |
+
+To switch everything to HTTPS in one go, without editing the accounts file:
+
+```bash
+HTTPS_ONLY=1 ./setup-git-hosts.sh
+```
+
+`HTTPS_ONLY=1` skips SSH for every account and requires an `https_user` per account (the script aborts otherwise). Existing key files are left on disk, they are simply no longer referenced. GPG signing is unaffected and works with both protocols.
+
+### SSH
+
+```bash
+git clone git@github.com:org/repo.git ~/projects/github-work/repo
+```
+
+The key comes from `core.sshCommand` in the per-account config.
+
+### HTTPS
+
+Set the 7th field (`https_user`) for the account, then clone with the username in the URL:
+
+```bash
+git clone https://your-handle@github.com/org/repo.git ~/projects/github-work/repo
+```
+
+What is stored where:
+
+- **Username** → stored as `credential.https://<host>.username` in `~/.gitconfig-<alias>`, i.e. per project directory. Two accounts on the same host therefore stay apart.
+- **Password / token** → never written by this script. Git asks for it on the first push/fetch and hands it to the credential helper, which returns it on every later request.
+
+```
+$ git push
+Username for 'https://github.com': your-handle      # prefilled from the config
+Password for 'https://your-handle@github.com':      # paste the token → asked only once
+```
+
+Use a **personal access token**, not your account password:
+
+| Host | Where | Scope |
+|---|---|---|
+| GitHub | Settings → Developer settings → Personal access tokens | classic: `repo`, fine-grained: Contents read/write |
+| GitLab | Settings → Access tokens | `write_repository` |
+| Gitea | Settings → Applications → Generate token | repo write |
+
+The helper is picked automatically: `osxkeychain` on macOS, `libsecret` or `manager` on Linux/Windows if present, otherwise `cache --timeout=86400` (in-memory only). It is written to the **global** config once, because the helper only decides *where* credentials are kept – the identity comes from the per-directory username. Override it with `CREDENTIAL_HELPER`, or keep your own with `SETUP_CREDENTIAL_HELPER=0`.
+
+To replace a stored token, erase it and push again:
+
+```bash
+printf 'protocol=https\nhost=github.com\nusername=your-handle\n\n' | git credential reject
+```
+
+### Note on cloning
+
+`includeIf "gitdir:..."` only matches once a repository exists, so during `git clone` itself the per-account config is not active yet. That is why the username goes into the clone URL (HTTPS) or the key is passed explicitly (SSH):
+
+```bash
+git -c core.sshCommand="ssh -i ~/.ssh/id_ed25519_github_work -o IdentitiesOnly=yes" \
+    clone git@github.com:org/repo.git ~/projects/github-work/repo
+```
+
+Everything after the clone – fetch, push, commit, signing – is picked up automatically from the project directory. The script prints ready-to-use clone commands for both protocols per account.
+
+### Switching an existing repo
+
+```bash
+git remote set-url origin https://your-handle@github.com/org/repo.git   # SSH → HTTPS
+git remote set-url origin git@github.com:org/repo.git                   # HTTPS → SSH
+```
+
 ## Idempotency
 
-The script is safe to run repeatedly. Existing SSH keys, GPG keys, directories, git configs and `includeIf` entries are detected and skipped or updated instead of duplicated. New accounts can be added to `accounts.conf` at any time.
+The script is safe to run repeatedly. Existing SSH keys, GPG keys, directories, git configs, `includeIf` entries and an already configured `credential.helper` are detected and skipped or updated instead of duplicated. New accounts – and HTTPS usernames for existing ones – can be added to `accounts.conf` at any time.
 
 ## Security note
 
@@ -100,6 +198,8 @@ To protect it afterwards:
 gpg --edit-key <KEY-ID>
 passwd
 ```
+
+For HTTPS, no password or token ever ends up in a git config file – only the username does. The token is kept by the credential helper: in the system keychain/keyring (`osxkeychain`, `libsecret`, `manager`) or, with the `cache` fallback, in memory until the timeout expires. Avoid `credential.helper store`, which writes tokens in plain text to `~/.git-credentials`.
 
 ## License
 

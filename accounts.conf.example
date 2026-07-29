@@ -1,22 +1,36 @@
 # accounts.conf
 #
 # One line per account, format:
-#   alias|hostname|ssh_user|project_folder|git_name|git_email
+#   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user]
 #
 # alias          -> internal identifier for the key filename & git config,
 #                    e.g. github-work (does NOT appear in the clone URL)
 # hostname       -> real hostname, e.g. github.com (used when cloning)
-# ssh_user       -> usually "git"
+# ssh_user       -> usually "git"; leave EMPTY to disable SSH for this account
+#                    (HTTPS only: no SSH key is generated for it)
 # project_folder -> relative path under ~/projects, e.g. github-work
 # git_name       -> name used in commits made in this directory
 # git_email      -> e-mail used in commits made in this directory
+# https_user     -> OPTIONAL 7th field: your login name on that host, used for
+#                    HTTPS remotes. Only the username is stored in the git
+#                    config - the password/token is asked by git on the first
+#                    push/fetch and then cached by the credential helper.
+#                    Omit the field (or leave it empty) for SSH-only accounts.
+#
+# Each account needs at least one of ssh_user / https_user. To switch every
+# account to HTTPS at once, run: HTTPS_ONLY=1 ./setup-git-hosts.sh
 #
 # Blank lines and lines starting with '#' are ignored.
 #
 # Copy this file to accounts.conf and fill in your real data:
 #   cp accounts.conf.example accounts.conf
 
-github-personal|github.com|git|github-personal|Your Name|personal@example.com
-github-work|github.com|git|github-work|Your Name (Company)|work@company.example
-gitlab-work|gitlab.com|git|gitlab-work|Your Name (Company)|work@company.example
+# SSH + HTTPS (7 fields)
+github-personal|github.com|git|github-personal|Your Name|personal@example.com|your-gh-handle
+github-work|github.com|git|github-work|Your Name (Company)|work@company.example|your-work-gh-handle
+
+# HTTPS only (ssh_user field left empty -> no SSH key, no core.sshCommand)
+gitlab-work|gitlab.com||gitlab-work|Your Name (Company)|work@company.example|your-gl-handle
+
+# SSH only (6 fields, HTTPS username left out)
 company-gitea|git.company.example|git|company-gitea|Your Name (Company)|work@company.example
