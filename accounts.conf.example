@@ -1,0 +1,22 @@
+# accounts.conf
+#
+# One line per account, format:
+#   alias|hostname|ssh_user|project_folder|git_name|git_email
+#
+# alias          -> internal identifier for the key filename & git config,
+#                    e.g. github-work (does NOT appear in the clone URL)
+# hostname       -> real hostname, e.g. github.com (used when cloning)
+# ssh_user       -> usually "git"
+# project_folder -> relative path under ~/projects, e.g. github-work
+# git_name       -> name used in commits made in this directory
+# git_email      -> e-mail used in commits made in this directory
+#
+# Blank lines and lines starting with '#' are ignored.
+#
+# Copy this file to accounts.conf and fill in your real data:
+#   cp accounts.conf.example accounts.conf
+
+github-personal|github.com|git|github-personal|Your Name|personal@example.com
+github-work|github.com|git|github-work|Your Name (Company)|work@company.example
+gitlab-work|gitlab.com|git|gitlab-work|Your Name (Company)|work@company.example
+company-gitea|git.company.example|git|company-gitea|Your Name (Company)|work@company.example
