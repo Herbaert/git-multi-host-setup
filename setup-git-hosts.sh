@@ -41,15 +41,29 @@
 # the first argument or $ACCOUNTS_FILE). See accounts.conf.example for the
 # format.
 #
+# Re-running it after editing the accounts file performs an UPDATE: the
+# script compares the current state (~/.gitconfig-<alias> files and the
+# includeIf entries in ~/.gitconfig) against the accounts file and reports
+# every difference it applies - changed e-mail, renamed project folder,
+# added/removed HTTPS username, accounts that disappeared from the file.
+# Use DRY_RUN=1 to see the diff without changing anything.
+#
 # Usage:
 #   chmod +x setup-git-hosts.sh
 #   ./setup-git-hosts.sh                  # uses ./accounts.conf
 #   ./setup-git-hosts.sh /path/to/accs    # uses a custom file
 #   PROJECT_BASE=~/code ./setup-git-hosts.sh   # different base directory
+#   DRY_RUN=1 ./setup-git-hosts.sh        # only show what would change
 #
 # Environment variables:
 #   PROJECT_BASE=~/code             base directory for project folders
 #   ACCOUNTS_FILE=/path/accounts    accounts file (same as first argument)
+#   DRY_RUN=1                       change nothing, only report the diff
+#                                   between current state and accounts file
+#   PRUNE=1                         also remove leftovers of accounts that
+#                                   are no longer in the accounts file
+#                                   (git configs + includeIf entries; SSH
+#                                   and GPG keys are never deleted)
 #   HTTPS_ONLY=1                    no SSH at all: skip key generation and
 #                                   core.sshCommand for every account
 #                                   (requires an https_user per account)
@@ -183,6 +197,73 @@ CRED_HELPER="$(detect_credential_helper)"
 # HTTPS_ONLY=1 disables SSH for *all* accounts, no matter what the accounts
 # file says. Per account, SSH is disabled by leaving the ssh_user field empty.
 HTTPS_ONLY="${HTTPS_ONLY:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+PRUNE="${PRUNE:-0}"
+
+# ---------------------------------------------------------------------------
+# Update detection
+#
+# The accounts file is the desired state, the files on disk are the current
+# state. Every account is rendered into a temporary config first, compared
+# against what is already there, and the differences are reported key by key
+# before they are applied (or, with DRY_RUN=1, instead of applying them).
+# ---------------------------------------------------------------------------
+CREATED=0
+UPDATED=0
+UNCHANGED=0
+REMAPPED=0        # includeIf entries added or moved to another project folder
+CHANGE_HINTS=()   # collected notes about things the script does not fix itself
+
+# All keys of a git config file, one per line (git normalises them to
+# lowercase, e.g. credential.https://github.com.username).
+config_keys() {
+  [ -f "$1" ] || return 0
+  git config --file "$1" --list 2>/dev/null | cut -d= -f1 | sort -u
+}
+
+# Print every key whose value differs between two config files.
+# Returns 0 if the files are equivalent, 1 if anything differs.
+report_config_diff() {
+  local old="$1" new="$2" indent="$3"
+  local changed=0 key old_val new_val
+
+  while IFS= read -r key; do
+    [ -z "$key" ] && continue
+    old_val="$(git config --file "$old" --get "$key" 2>/dev/null || true)"
+    new_val="$(git config --file "$new" --get "$key" 2>/dev/null || true)"
+    [ "$old_val" = "$new_val" ] && continue
+    changed=1
+    if [ -z "$old_val" ]; then
+      echo "$indent+ $key = $new_val"
+    elif [ -z "$new_val" ]; then
+      echo "$indent- $key (was: $old_val)"
+    else
+      echo "$indent~ $key: $old_val -> $new_val"
+    fi
+  done < <( { config_keys "$old"; config_keys "$new"; } | sort -u )
+
+  return $changed
+}
+
+# All gitdirs currently mapped to a given ~/.gitconfig-<alias> file, one per
+# line. Lets the script recognise a renamed project folder (same config file,
+# different gitdir) instead of appending a second, contradicting entry.
+includeif_gitdirs_for() {
+  local target="$1" line key value
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    key="${line%% *}"
+    value="${line#* }"
+    [ "$value" = "$target" ] || continue
+    key="${key#includeif.gitdir:}"
+    echo "${key%.path}"
+  done < <(git config --file "$GITCONFIG_GLOBAL" --get-regexp '^includeif\.gitdir:' 2>/dev/null || true)
+}
+
+# Remove one includeIf entry (section header included) from ~/.gitconfig.
+remove_includeif() {
+  git config --file "$GITCONFIG_GLOBAL" --remove-section "includeIf.gitdir:$1" 2>/dev/null || true
+}
 
 # Validate the protocol combination and count how many accounts use SSH /
 # HTTPS, so that SSH-only and HTTPS-only setups stay free of the other half.
@@ -220,6 +301,10 @@ echo "== Git multi-host setup (SSH / HTTPS + GPG) =="
 if [ "$HTTPS_ONLY" = "1" ]; then
   echo "   HTTPS_ONLY=1: no SSH keys are generated or configured."
 fi
+if [ "$DRY_RUN" = "1" ]; then
+  echo "   DRY_RUN=1: nothing is written, only the pending changes are shown."
+fi
+echo "   Accounts file: $ACCOUNTS_FILE"
 echo
 
 for entry in "${ACCOUNTS[@]}"; do
@@ -241,6 +326,8 @@ for entry in "${ACCOUNTS[@]}"; do
     echo "  SSH disabled for this account (HTTPS only)"
   elif [ -f "$key_path" ]; then
     echo "  SSH key already exists: $key_path (skipped)"
+  elif [ "$DRY_RUN" = "1" ]; then
+    echo "  SSH key WOULD BE created: $key_path"
   else
     ssh-keygen -t ed25519 -C "$email" -f "$key_path" -N ""
     echo "  SSH key created: $key_path"
@@ -253,6 +340,9 @@ for entry in "${ACCOUNTS[@]}"; do
   if [ -n "$existing_fpr" ]; then
     gpg_fpr="$existing_fpr"
     echo "  GPG key already exists for $email (skipped): $gpg_fpr"
+  elif [ "$DRY_RUN" = "1" ]; then
+    gpg_fpr="<new key for $email>"
+    echo "  GPG key WOULD BE created for $email"
   else
     gpg_batch_file="$(mktemp)"
     cat > "$gpg_batch_file" <<EOF
@@ -277,12 +367,20 @@ EOF
   fi
 
   # 3. Create the project directory
-  mkdir -p "$project_path"
-  echo "  Directory ensured: $project_path"
+  if [ -d "$project_path" ]; then
+    echo "  Directory ensured: $project_path"
+  elif [ "$DRY_RUN" = "1" ]; then
+    echo "  Directory WOULD BE created: $project_path"
+  else
+    mkdir -p "$project_path"
+    echo "  Directory created: $project_path"
+  fi
 
-  # 4. Write the directory-specific git config: identity + GPG signing, plus
-  #    core.sshCommand and/or the HTTPS username depending on the account.
-  cat > "$gitconfig_path" <<EOF
+  # 4. Render the desired directory-specific git config (identity + GPG
+  #    signing, plus core.sshCommand and/or the HTTPS username) into a
+  #    temporary file, so it can be compared against what is already there.
+  desired_cfg="$(mktemp)"
+  cat > "$desired_cfg" <<EOF
 [user]
     name = $name
     email = $email
@@ -290,13 +388,13 @@ EOF
 EOF
 
   if [ -n "$ssh_user" ]; then
-    cat >> "$gitconfig_path" <<EOF
+    cat >> "$desired_cfg" <<EOF
 [core]
     sshCommand = "ssh -i $key_path -o IdentitiesOnly=yes"
 EOF
   fi
 
-  cat >> "$gitconfig_path" <<EOF
+  cat >> "$desired_cfg" <<EOF
 [commit]
     gpgsign = true
 [tag]
@@ -307,27 +405,80 @@ EOF
   #     ever written here - git asks for it once and the credential helper
   #     keeps it afterwards.
   if [ -n "$https_user" ]; then
-    cat >> "$gitconfig_path" <<EOF
+    cat >> "$desired_cfg" <<EOF
 [credential "https://$hostname"]
     username = $https_user
 EOF
-    echo "  HTTPS username for $hostname: $https_user (token will be asked once)"
   fi
 
-  echo "  Git config created: $gitconfig_path"
+  # 4c. Compare current against desired and report every difference.
+  if [ ! -f "$gitconfig_path" ]; then
+    CREATED=$((CREATED + 1))
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "  Git config WOULD BE created: $gitconfig_path"
+    else
+      cat "$desired_cfg" > "$gitconfig_path"
+      echo "  Git config created: $gitconfig_path"
+    fi
+    report_config_diff /dev/null "$desired_cfg" "      " || true
+  elif report_config_diff "$gitconfig_path" "$desired_cfg" "      "; then
+    UNCHANGED=$((UNCHANGED + 1))
+    echo "  Git config unchanged: $gitconfig_path"
+  else
+    UPDATED=$((UPDATED + 1))
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "  Git config WOULD BE updated (changes above): $gitconfig_path"
+    else
+      cat "$desired_cfg" > "$gitconfig_path"
+      echo "  Git config updated (changes above): $gitconfig_path"
+    fi
+  fi
+  rm -f "$desired_cfg"
 
-  # 5. Append the includeIf entry to ~/.gitconfig unless it is already there
-  includeif_marker="gitdir:$project_path/"
-  if grep -qF "$includeif_marker" "$GITCONFIG_GLOBAL" 2>/dev/null; then
+  # 5. Map the project directory to that config via includeIf. If the config
+  #    is already mapped to a *different* gitdir, the project folder was
+  #    renamed in the accounts file - move the entry instead of adding a
+  #    second one that would still match the old directory.
+  desired_gitdir="$project_path/"
+  mapped_gitdirs=()
+  while IFS= read -r g; do
+    [ -n "$g" ] && mapped_gitdirs+=("$g")
+  done < <(includeif_gitdirs_for "$gitconfig_path")
+
+  already_mapped=0
+  for g in ${mapped_gitdirs[@]+"${mapped_gitdirs[@]}"}; do
+    [ "$g" = "$desired_gitdir" ] && already_mapped=1
+  done
+
+  if [ "$already_mapped" = "1" ]; then
     echo "  includeIf entry already exists (skipped)"
+  elif [ "$DRY_RUN" = "1" ]; then
+    REMAPPED=$((REMAPPED + 1))
+    echo "  includeIf entry WOULD BE added: gitdir:$desired_gitdir"
   else
     {
       echo ""
-      echo "[includeIf \"gitdir:$project_path/\"]"
+      echo "[includeIf \"gitdir:$desired_gitdir\"]"
       echo "    path = $gitconfig_path"
     } >> "$GITCONFIG_GLOBAL"
-    echo "  includeIf entry appended to ~/.gitconfig"
+    REMAPPED=$((REMAPPED + 1))
+    echo "  includeIf entry appended to ~/.gitconfig: gitdir:$desired_gitdir"
   fi
+
+  # Any other gitdir pointing at this config is stale (renamed folder or a
+  # duplicate from an earlier run) and would keep matching the old path.
+  for g in ${mapped_gitdirs[@]+"${mapped_gitdirs[@]}"}; do
+    [ "$g" = "$desired_gitdir" ] && continue
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "  stale includeIf entry WOULD BE removed: gitdir:$g"
+    else
+      remove_includeif "$g"
+      echo "  stale includeIf entry removed: gitdir:$g"
+    fi
+    if [ -d "${g%/}" ]; then
+      CHANGE_HINTS+=("$alias: old project directory ${g%/} still exists - move its repos to $project_path or delete it")
+    fi
+  done
 
   echo
 done
@@ -348,10 +499,77 @@ if [ "$HTTPS_ACCOUNTS" -gt 0 ]; then
     echo "credential.helper not configured (SETUP_CREDENTIAL_HELPER=0):"
     echo "  HTTPS tokens will be asked for on EVERY push until you set one, e.g.:"
     echo "  git config --global credential.helper '$CRED_HELPER'"
+  elif [ "$DRY_RUN" = "1" ]; then
+    CRED_HELPER_ACTIVE="$CRED_HELPER"
+    echo "credential.helper WOULD BE set globally: $CRED_HELPER"
   else
     git config --global credential.helper "$CRED_HELPER"
     CRED_HELPER_ACTIVE="$CRED_HELPER"
     echo "credential.helper set globally: $CRED_HELPER"
+  fi
+  echo
+fi
+
+# ---------------------------------------------------------------------------
+# Leftovers: configs and includeIf entries of accounts that are no longer in
+# the accounts file. They are only reported unless PRUNE=1 is set, because
+# removing config the user may still need is not something to do silently.
+# SSH and GPG keys are never deleted here.
+# ---------------------------------------------------------------------------
+KNOWN_CONFIGS=()
+for entry in "${ACCOUNTS[@]}"; do
+  IFS='|' read -r k_alias _rest <<< "$entry"
+  KNOWN_CONFIGS+=("$HOME/.gitconfig-$k_alias")
+done
+
+is_known_config() {
+  local candidate="$1" known
+  for known in ${KNOWN_CONFIGS[@]+"${KNOWN_CONFIGS[@]}"}; do
+    [ "$known" = "$candidate" ] && return 0
+  done
+  return 1
+}
+
+ORPHANS=0
+
+# a) includeIf entries pointing at a config that no account owns any more
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  ii_key="${line%% *}"
+  ii_path="${line#* }"
+  is_known_config "$ii_path" && continue
+  ii_gitdir="${ii_key#includeif.gitdir:}"
+  ii_gitdir="${ii_gitdir%.path}"
+  ORPHANS=$((ORPHANS + 1))
+  if [ "$PRUNE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+    remove_includeif "$ii_gitdir"
+    echo "Removed orphaned includeIf entry: gitdir:$ii_gitdir -> $ii_path"
+  elif [ "$PRUNE" = "1" ]; then
+    echo "Orphaned includeIf entry WOULD BE removed: gitdir:$ii_gitdir -> $ii_path"
+  else
+    echo "Orphaned includeIf entry in ~/.gitconfig: gitdir:$ii_gitdir -> $ii_path"
+  fi
+done < <(git config --file "$GITCONFIG_GLOBAL" --get-regexp '^includeif\.gitdir:' 2>/dev/null || true)
+
+# b) ~/.gitconfig-<alias> files without a matching account
+for cfg in "$HOME"/.gitconfig-*; do
+  [ -f "$cfg" ] || continue
+  is_known_config "$cfg" && continue
+  ORPHANS=$((ORPHANS + 1))
+  if [ "$PRUNE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+    rm -f "$cfg"
+    echo "Removed orphaned git config: $cfg"
+  elif [ "$PRUNE" = "1" ]; then
+    echo "Orphaned git config WOULD BE removed: $cfg"
+  else
+    echo "Orphaned git config (no account in $(basename "$ACCOUNTS_FILE")): $cfg"
+  fi
+done
+
+if [ "$ORPHANS" -gt 0 ]; then
+  if [ "$PRUNE" != "1" ]; then
+    echo "  -> left untouched; run with PRUNE=1 to remove them"
+    echo "     (SSH and GPG keys are never deleted, remove those by hand)"
   fi
   echo
 fi
@@ -368,7 +586,33 @@ else
   CLIP_CMD=""
 fi
 
-echo "== Done =="
+if [ "$DRY_RUN" = "1" ]; then
+  echo "== Dry run - nothing was written =="
+else
+  echo "== Done =="
+fi
+orphan_note=""
+if [ "$ORPHANS" -gt 0 ] && [ "$PRUNE" = "1" ]; then
+  if [ "$DRY_RUN" = "1" ]; then
+    orphan_note=" (would be pruned)"
+  else
+    orphan_note=" (pruned)"
+  fi
+fi
+echo "Summary: ${#ACCOUNTS[@]} account(s) in $(basename "$ACCOUNTS_FILE") - \
+$CREATED created, $UPDATED updated, $UNCHANGED unchanged, $REMAPPED includeIf added/moved, \
+$ORPHANS leftover(s)$orphan_note"
+if [ "${#CHANGE_HINTS[@]}" -gt 0 ]; then
+  echo
+  echo "Needs your attention:"
+  for hint in "${CHANGE_HINTS[@]}"; do
+    echo "   - $hint"
+  done
+fi
+if [ "$DRY_RUN" = "1" ]; then
+  echo
+  echo "Re-run without DRY_RUN=1 to apply the changes above."
+fi
 echo
 echo "Next steps:"
 

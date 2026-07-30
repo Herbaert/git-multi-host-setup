@@ -79,6 +79,8 @@ For every account defined in the accounts file, it automatically:
    | `CREDENTIAL_HELPER` | auto-detected | credential helper for HTTPS tokens, e.g. `'cache --timeout=3600'` |
    | `CREDENTIAL_CACHE_TIMEOUT` | `86400` | timeout in seconds, only used for the `cache` fallback |
    | `SETUP_CREDENTIAL_HELPER` | `1` | set to `0` to never touch the global `credential.helper` |
+   | `DRY_RUN` | `0` | set to `1` to only show what would change, without writing anything |
+   | `PRUNE` | `0` | set to `1` to also remove leftovers of accounts no longer in the accounts file |
 
 2. Run it:
 
@@ -184,9 +186,28 @@ git remote set-url origin https://your-handle@github.com/org/repo.git   # SSH �
 git remote set-url origin git@github.com:org/repo.git                   # HTTPS → SSH
 ```
 
-## Idempotency
+## Idempotency & updates
 
-The script is safe to run repeatedly. Existing SSH keys, GPG keys, directories, git configs, `includeIf` entries and an already configured `credential.helper` are detected and skipped or updated instead of duplicated. New accounts – and HTTPS usernames for existing ones – can be added to `accounts.conf` at any time.
+The script is safe to run repeatedly and doubles as an **update mechanism**: edit `accounts.conf` and run it again, and it reconciles the files on disk with what the accounts file now says.
+
+- **SSH/GPG keys, directories** – created if missing, left alone otherwise (a changed `git_email` does **not** regenerate the GPG key; delete the old one yourself if you really want a new one).
+- **`~/.gitconfig-<alias>`** – compared setting by setting against what the account line now produces. Every difference is printed before it's applied, e.g.:
+  ```
+  ~ user.name: Old Name -> New Name
+  + credential.https://github.com.username = new-handle
+  - core.sshcommand (was: ssh -i ...)
+  ```
+- **`includeIf` entries** – if `project_folder` changes, the entry is moved to the new path instead of adding a second, contradicting one. The old directory is reported under "Needs your attention" if it still exists on disk (repos in it keep using the old config until moved).
+- **Removed accounts** – deleting a line from `accounts.conf` does **not** delete anything by default, so the leftover `~/.gitconfig-<alias>` and `includeIf` entry are only reported for you to decide. Add `PRUNE=1` to remove them (SSH and GPG keys are never touched by prune – remove those by hand if no longer needed).
+
+Preview any change before committing to it:
+
+```bash
+DRY_RUN=1 ./setup-git-hosts.sh              # show the diff, write nothing
+DRY_RUN=1 PRUNE=1 ./setup-git-hosts.sh      # ...including what PRUNE would delete
+```
+
+The run ends with a summary line, e.g. `2 account(s) - 0 created, 1 updated, 1 unchanged, 0 includeIf added/moved, 0 leftover(s)`.
 
 ## Security note
 
