@@ -17,8 +17,7 @@
 #                    push/fetch and then cached by the credential helper.
 #                    Omit the field (or leave it empty) for SSH-only accounts.
 #
-# Each account needs at least one of ssh_user / https_user. To switch every
-# account to HTTPS at once, run: HTTPS_ONLY=1 ./setup-git-hosts.sh
+# Each account needs at least one of ssh_user / https_user.
 #
 # Blank lines and lines starting with '#' are ignored.
 #

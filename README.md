@@ -75,7 +75,6 @@ For every account defined in the accounts file, it automatically:
    |---|---|---|
    | `PROJECT_BASE` | `~/projects` | base directory for the project folders |
    | `ACCOUNTS_FILE` | `./accounts.conf` | accounts file (same as the first argument) |
-   | `HTTPS_ONLY` | `0` | set to `1` to disable SSH for **all** accounts: no keys are generated, no `core.sshCommand` is written |
    | `CREDENTIAL_HELPER` | auto-detected | credential helper for HTTPS tokens, e.g. `'cache --timeout=3600'` |
    | `CREDENTIAL_CACHE_TIMEOUT` | `86400` | timeout in seconds, only used for the `cache` fallback |
    | `SETUP_CREDENTIAL_HELPER` | `1` | set to `0` to never touch the global `credential.helper` |
@@ -116,14 +115,6 @@ The project directory decides which identity is used, not the protocol. Each acc
 | `alias\|github.com\|git\|folder\|Name\|mail\|handle` | SSH **and** HTTPS |
 | `alias\|github.com\|git\|folder\|Name\|mail` | SSH only – no HTTPS username |
 | `alias\|github.com\|\|folder\|Name\|mail\|handle` | **HTTPS only** – `ssh_user` empty, so no SSH key is generated and no `core.sshCommand` is written |
-
-To switch everything to HTTPS in one go, without editing the accounts file:
-
-```bash
-HTTPS_ONLY=1 ./setup-git-hosts.sh
-```
-
-`HTTPS_ONLY=1` skips SSH for every account and requires an `https_user` per account (the script aborts otherwise). Existing key files are left on disk, they are simply no longer referenced. GPG signing is unaffected and works with both protocols.
 
 ### SSH
 

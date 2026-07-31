@@ -26,7 +26,6 @@
 #   - SSH only     -> https_user left out (7th field omitted/empty)
 #   - HTTPS only   -> ssh_user left empty, e.g. "alias|github.com||folder|..."
 #                     no SSH key is generated and no core.sshCommand written
-# HTTPS_ONLY=1 forces HTTPS-only for every account in one go.
 #
 # GPG WARNING: the generated GPG keys are created WITHOUT a passphrase
 # (%no-protection) so that the script can run fully unattended. This means
@@ -64,9 +63,6 @@
 #                                   are no longer in the accounts file
 #                                   (git configs + includeIf entries; SSH
 #                                   and GPG keys are never deleted)
-#   HTTPS_ONLY=1                    no SSH at all: skip key generation and
-#                                   core.sshCommand for every account
-#                                   (requires an https_user per account)
 #   CREDENTIAL_HELPER='cache --timeout=3600'
 #                                   override the auto-detected credential
 #                                   helper (default: osxkeychain on macOS,
@@ -194,9 +190,6 @@ detect_credential_helper() {
 
 CRED_HELPER="$(detect_credential_helper)"
 
-# HTTPS_ONLY=1 disables SSH for *all* accounts, no matter what the accounts
-# file says. Per account, SSH is disabled by leaving the ssh_user field empty.
-HTTPS_ONLY="${HTTPS_ONLY:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PRUNE="${PRUNE:-0}"
 
@@ -272,15 +265,9 @@ HTTPS_ACCOUNTS=0
 for entry in "${ACCOUNTS[@]}"; do
   IFS='|' read -r e_alias e_hostname e_ssh_user e_folder e_name e_email e_https_user <<< "$entry"
   e_https_user="${e_https_user:-}"
-  if [ "$HTTPS_ONLY" = "1" ]; then
-    e_ssh_user=""
-  fi
   if [ -z "$e_ssh_user" ] && [ -z "$e_https_user" ]; then
     echo "ERROR: account '$e_alias' has neither an ssh_user nor an https_user." >&2
     echo "  Set ssh_user (usually 'git') for SSH, https_user for HTTPS, or both." >&2
-    if [ "$HTTPS_ONLY" = "1" ]; then
-      echo "  Note: HTTPS_ONLY=1 disables SSH, so an https_user is required." >&2
-    fi
     exit 1
   fi
   if [ -n "$e_ssh_user" ]; then
@@ -298,9 +285,6 @@ if [ "$SSH_ACCOUNTS" -gt 0 ]; then
 fi
 
 echo "== Git multi-host setup (SSH / HTTPS + GPG) =="
-if [ "$HTTPS_ONLY" = "1" ]; then
-  echo "   HTTPS_ONLY=1: no SSH keys are generated or configured."
-fi
 if [ "$DRY_RUN" = "1" ]; then
   echo "   DRY_RUN=1: nothing is written, only the pending changes are shown."
 fi
@@ -310,9 +294,6 @@ echo
 for entry in "${ACCOUNTS[@]}"; do
   IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
   https_user="${https_user:-}"
-  if [ "$HTTPS_ONLY" = "1" ]; then
-    ssh_user=""
-  fi
 
   key_path="$SSH_DIR/id_ed25519_${alias//-/_}"
   project_path="$PROJECT_BASE/$folder"
@@ -627,7 +608,7 @@ if [ "$SSH_ACCOUNTS" -gt 0 ]; then
   step "Add the SSH public keys to the respective hosts (Settings -> SSH keys):"
   for entry in "${ACCOUNTS[@]}"; do
     IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
-    if [ "$HTTPS_ONLY" = "1" ] || [ -z "$ssh_user" ]; then
+    if [ -z "$ssh_user" ]; then
       continue
     fi
     key_path="$SSH_DIR/id_ed25519_${alias//-/_}.pub"
@@ -668,7 +649,7 @@ if [ "$SSH_ACCOUNTS" -gt 0 ]; then
   step "Test the SSH connection, e.g.:"
   for entry in "${ACCOUNTS[@]}"; do
     IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
-    if [ "$HTTPS_ONLY" = "1" ] || [ -z "$ssh_user" ]; then
+    if [ -z "$ssh_user" ]; then
       continue
     fi
     key_path="$SSH_DIR/id_ed25519_${alias//-/_}"
@@ -685,9 +666,6 @@ echo
 for entry in "${ACCOUNTS[@]}"; do
   IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
   https_user="${https_user:-}"
-  if [ "$HTTPS_ONLY" = "1" ]; then
-    ssh_user=""
-  fi
   key_path="$SSH_DIR/id_ed25519_${alias//-/_}"
   echo "   - $alias -> $PROJECT_BASE/$folder/repo"
   if [ -n "$ssh_user" ]; then
@@ -696,7 +674,7 @@ for entry in "${ACCOUNTS[@]}"; do
   fi
   if [ -n "$https_user" ]; then
     echo "       HTTPS:  git clone https://$https_user@$hostname/org/repo.git $PROJECT_BASE/$folder/repo"
-  elif [ "$HTTPS_ONLY" != "1" ]; then
+  else
     echo "       HTTPS:  not configured (add a 7th field 'https_user' in $(basename "$ACCOUNTS_FILE"))"
   fi
 done
