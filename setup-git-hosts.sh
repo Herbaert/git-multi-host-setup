@@ -31,6 +31,7 @@
 # (%no-protection) so that the script can run fully unattended. This means
 # the private key sits unprotected in your GPG keyring (~/.gnupg). Anyone
 # with access to your user account can sign with it.
+# Run with GPG_PASSPHRASE=1 to be asked for one instead.
 # To protect it afterwards:
 #   gpg --edit-key <KEY-ID>
 #   passwd
@@ -71,6 +72,8 @@
 #                                   otherwise 'cache')
 #   CREDENTIAL_CACHE_TIMEOUT=86400  timeout for the 'cache' fallback only
 #   SETUP_CREDENTIAL_HELPER=0       never touch global credential.helper
+#   GPG_PASSPHRASE=1                protect newly created GPG keys with a
+#                                   passphrase (asked by gpg, needs a terminal)
 #
 # Afterwards you have to:
 #   - add the generated SSH *.pub keys to the respective hosts
@@ -159,6 +162,17 @@ gpg_fpr_for_email() {
         }
         $1 == "fpr" && pick { print $10; exit }
       ' || true
+}
+
+# extend_key <fpr> [interactive]
+extend_key() {
+  local opts=(--batch --pinentry-mode loopback --passphrase '')
+  if [ "${2:-}" = "interactive" ]; then
+    opts=()
+    echo "  GPG key $1 is protected - gpg will ask for its passphrase"
+  fi
+  gpg ${opts[@]+"${opts[@]}"} --quick-set-expire "$1" 2y >/dev/null 2>&1 \
+    && gpg ${opts[@]+"${opts[@]}"} --quick-set-expire "$1" 2y '*' >/dev/null 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -293,6 +307,22 @@ fi
 if ! command -v git >/dev/null 2>&1; then
   echo "ERROR: 'git' not found. Please install git and run again." >&2
   exit 1
+fi
+
+# pinentry cannot find the terminal on its own.
+if [ -t 0 ]; then
+  GPG_TTY="$(tty)"
+  export GPG_TTY
+fi
+
+GPG_PASSPHRASE="${GPG_PASSPHRASE:-0}"
+GPG_PROTECTION="%no-protection"
+if [ "$GPG_PASSPHRASE" = "1" ]; then
+  GPG_PROTECTION=""
+  if [ ! -t 0 ] && [ "$DRY_RUN" != "1" ]; then
+    echo "ERROR: GPG_PASSPHRASE=1 needs a terminal, gpg asks for the passphrase there." >&2
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -507,15 +537,13 @@ for entry in "${ACCOUNTS[@]}"; do
     extend_cmd="gpg --quick-set-expire $expired_fpr 2y && gpg --quick-set-expire $expired_fpr 2y '*'"
     if [ "$DRY_RUN" = "1" ]; then
       echo "  GPG key for $email is EXPIRED and WOULD BE extended by 2 years: $gpg_fpr"
-    elif gpg --batch --pinentry-mode loopback --passphrase '' \
-           --quick-set-expire "$expired_fpr" 2y >/dev/null 2>&1 \
-         && gpg --batch --pinentry-mode loopback --passphrase '' \
-           --quick-set-expire "$expired_fpr" 2y '*' >/dev/null 2>&1 \
+    elif { extend_key "$expired_fpr" \
+           || { [ -t 0 ] && extend_key "$expired_fpr" interactive; }; } \
          && [ "$(gpg_fpr_for_email "$email")" = "$expired_fpr" ]; then
       echo "  GPG key for $email was expired - extended by 2 years: $gpg_fpr"
       CHANGE_HINTS+=("$alias: GPG key $gpg_fpr was extended - re-upload its public key to $hostname, the copy there still shows the old expiry")
     else
-      # Probably protected by a passphrase. Rotating to a new key is the user's call.
+      # Rotating to a new key is the user's call.
       echo "  GPG key for $email is EXPIRED and could not be extended automatically: $gpg_fpr"
       CHANGE_HINTS+=("$alias: GPG key $gpg_fpr has expired, commits cannot be signed - extend it with: $extend_cmd (then re-upload the public key to $hostname)")
     fi
@@ -526,7 +554,7 @@ for entry in "${ACCOUNTS[@]}"; do
     gpg_batch_file="$(mktemp)"; TMP_FILES+=("$gpg_batch_file")
     gpg_err_file="$(mktemp)"; TMP_FILES+=("$gpg_err_file")
     cat > "$gpg_batch_file" <<EOF
-%no-protection
+$GPG_PROTECTION
 Key-Type: eddsa
 Key-Curve: ed25519
 Key-Usage: sign
@@ -736,6 +764,11 @@ fi
 # Only what this script wrote is removed. Everything else is reported as unmanaged.
 ORPHANS=0
 UNMANAGED=0
+# Unmanaged files are deliberate, so list them only when cleaning up.
+LIST_UNMANAGED=0
+if [ "$DRY_RUN" = "1" ] || [ "$PRUNE" = "1" ]; then
+  LIST_UNMANAGED=1
+fi
 
 # a) includeIf entries pointing at a config that no account owns any more.
 #    Kept when the target is a user file, since removing it would unwire its repos.
@@ -745,7 +778,9 @@ while IFS= read -r ii_entry; do
   is_known_config "$ii_path" && continue
   if [ -e "$ii_path" ] && ! is_managed_config "$ii_path"; then
     UNMANAGED=$((UNMANAGED + 1))
-    echo "includeIf entry for an unmanaged config, not touched: gitdir:$ii_gitdir -> $ii_path"
+    if [ "$LIST_UNMANAGED" = "1" ]; then
+      echo "includeIf entry for an unmanaged config, not touched: gitdir:$ii_gitdir -> $ii_path"
+    fi
     continue
   fi
   ORPHANS=$((ORPHANS + 1))
@@ -765,7 +800,9 @@ for cfg in "$HOME"/.gitconfig-*; do
   is_known_config "$cfg" && continue
   if ! is_managed_config "$cfg"; then
     UNMANAGED=$((UNMANAGED + 1))
-    echo "Unmanaged git config, not touched: $cfg"
+    if [ "$LIST_UNMANAGED" = "1" ]; then
+      echo "Unmanaged git config, not touched: $cfg"
+    fi
     continue
   fi
   ORPHANS=$((ORPHANS + 1))
@@ -783,11 +820,10 @@ if [ "$ORPHANS" -gt 0 ] && [ "$PRUNE" != "1" ]; then
   echo "  -> left untouched; run with PRUNE=1 to remove them"
   echo "     (SSH and GPG keys are never deleted, remove those by hand)"
 fi
-if [ "$UNMANAGED" -gt 0 ]; then
-  echo "  -> unmanaged = not written by this script (no matching marker line);"
-  echo "     PRUNE never removes those - delete them by hand if no longer needed"
+if [ "$UNMANAGED" -gt 0 ] && [ "$LIST_UNMANAGED" = "1" ]; then
+  echo "  -> unmanaged = not written by this script. PRUNE never removes those."
 fi
-if [ $((ORPHANS + UNMANAGED)) -gt 0 ]; then
+if [ "$ORPHANS" -gt 0 ] || { [ "$UNMANAGED" -gt 0 ] && [ "$LIST_UNMANAGED" = "1" ]; }; then
   echo
 fi
 
