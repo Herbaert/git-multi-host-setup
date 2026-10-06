@@ -53,7 +53,11 @@ STUB
   export PATH="$SB/bin:$ORIG_PATH"
 }
 
-use_real_gpg() { rm -f "$SB/bin/gpg"; }
+# Each test runs in its own subshell, so its EXIT trap stops that sandbox's agent.
+use_real_gpg() {
+  rm -f "$SB/bin/gpg"
+  trap 'gpgconf --kill gpg-agent 2>/dev/null' EXIT
+}
 
 # run [VAR=value ...]: run the script on $ACC, print its exit code.
 # stdin is /dev/null so the script never sees a terminal and never waits on pinentry.

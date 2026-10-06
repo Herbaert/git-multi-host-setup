@@ -164,15 +164,25 @@ gpg_fpr_for_email() {
       ' || true
 }
 
+# pinentry-curses needs 14 rows and below that fails with "Screen or window too
+# small". pinentry-mac opens its own window.
+pinentry_fits() {
+  local rows
+  grep -qs '^[[:space:]]*pinentry-program.*pinentry-mac' "${GNUPGHOME:-$HOME/.gnupg}/gpg-agent.conf" && return 0
+  rows="$(stty size 2>/dev/null)"
+  [ "${rows%% *}" -ge 14 ] 2>/dev/null
+}
+
 # extend_key <fpr> [interactive]
 extend_key() {
-  local opts=(--batch --pinentry-mode loopback --passphrase '')
+  local opts=(--batch --pinentry-mode loopback --passphrase '') err=/dev/null
   if [ "${2:-}" = "interactive" ]; then
     opts=()
+    err=/dev/stderr
     echo "  GPG key $1 is protected - gpg will ask for its passphrase"
   fi
-  gpg ${opts[@]+"${opts[@]}"} --quick-set-expire "$1" 2y >/dev/null 2>&1 \
-    && gpg ${opts[@]+"${opts[@]}"} --quick-set-expire "$1" 2y '*' >/dev/null 2>&1
+  gpg ${opts[@]+"${opts[@]}"} --quick-set-expire "$1" 2y >/dev/null 2>"$err" \
+    && gpg ${opts[@]+"${opts[@]}"} --quick-set-expire "$1" 2y '*' >/dev/null 2>"$err"
 }
 
 # ---------------------------------------------------------------------------
@@ -321,6 +331,11 @@ if [ "$GPG_PASSPHRASE" = "1" ]; then
   GPG_PROTECTION=""
   if [ ! -t 0 ] && [ "$DRY_RUN" != "1" ]; then
     echo "ERROR: GPG_PASSPHRASE=1 needs a terminal, gpg asks for the passphrase there." >&2
+    exit 1
+  fi
+  if [ -t 0 ] && [ "$DRY_RUN" != "1" ] && ! pinentry_fits; then
+    echo "ERROR: the terminal is too small for gpg's passphrase dialog." >&2
+    echo "  Make it at least 14 rows high and run again." >&2
     exit 1
   fi
 fi
@@ -538,13 +553,16 @@ for entry in "${ACCOUNTS[@]}"; do
     if [ "$DRY_RUN" = "1" ]; then
       echo "  GPG key for $email is EXPIRED and WOULD BE extended by 2 years: $gpg_fpr"
     elif { extend_key "$expired_fpr" \
-           || { [ -t 0 ] && extend_key "$expired_fpr" interactive; }; } \
+           || { [ -t 0 ] && pinentry_fits && extend_key "$expired_fpr" interactive; }; } \
          && [ "$(gpg_fpr_for_email "$email")" = "$expired_fpr" ]; then
       echo "  GPG key for $email was expired - extended by 2 years: $gpg_fpr"
       CHANGE_HINTS+=("$alias: GPG key $gpg_fpr was extended - re-upload its public key to $hostname, the copy there still shows the old expiry")
     else
       # Rotating to a new key is the user's call.
       echo "  GPG key for $email is EXPIRED and could not be extended automatically: $gpg_fpr"
+      if [ -t 0 ] && ! pinentry_fits; then
+        echo "  (the terminal is too small for gpg's passphrase dialog, it needs 14 rows)"
+      fi
       CHANGE_HINTS+=("$alias: GPG key $gpg_fpr has expired, commits cannot be signed - extend it with: $extend_cmd (then re-upload the public key to $hostname)")
     fi
   elif [ "$DRY_RUN" = "1" ]; then

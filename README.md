@@ -86,7 +86,7 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
    | `CREDENTIAL_HELPER` | auto-detected | credential helper for HTTPS tokens, e.g. `'cache --timeout=3600'` |
    | `CREDENTIAL_CACHE_TIMEOUT` | `86400` | timeout in seconds, only used for the `cache` fallback |
    | `SETUP_CREDENTIAL_HELPER` | `1` | set to `0` to never touch the global `credential.helper` |
-   | `GPG_PASSPHRASE` | `0` | set to `1` to protect newly created GPG keys with a passphrase (gpg asks, needs a terminal) |
+   | `GPG_PASSPHRASE` | `0` | set to `1` to protect newly created GPG keys with a passphrase (gpg asks, needs a terminal at least 14 rows high) |
    | `DRY_RUN` | `0` | set to `1` to only show what would change, without writing anything |
    | `PRUNE` | `0` | set to `1` to also remove leftovers of accounts no longer in the accounts file (see [Removed accounts](#idempotency--updates)) |
 
