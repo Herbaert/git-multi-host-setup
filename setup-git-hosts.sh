@@ -62,7 +62,8 @@
 #   PRUNE=1                         also remove leftovers of accounts that
 #                                   are no longer in the accounts file
 #                                   (git configs + includeIf entries; SSH
-#                                   and GPG keys are never deleted)
+#                                   and GPG keys are never deleted).
+#                                   Hand-written ~/.gitconfig-* files stay.
 #   CREDENTIAL_HELPER='cache --timeout=3600'
 #                                   override the auto-detected credential
 #                                   helper (default: osxkeychain on macOS,
@@ -78,6 +79,11 @@
 
 set -euo pipefail
 
+# Rendered configs hold name, e-mail and fingerprint, so temp files must not
+# outlive an aborted run.
+TMP_FILES=()
+trap 'rm -f ${TMP_FILES[@]+"${TMP_FILES[@]}"}' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ACCOUNTS_FILE="${1:-${ACCOUNTS_FILE:-$SCRIPT_DIR/accounts.conf}}"
 
@@ -86,6 +92,74 @@ if [ ! -f "$ACCOUNTS_FILE" ]; then
   echo "Create an accounts.conf (see accounts.conf.example) or pass the path as an argument." >&2
   exit 1
 fi
+
+DRY_RUN="${DRY_RUN:-0}"
+PRUNE="${PRUNE:-0}"
+
+PROJECT_BASE="${PROJECT_BASE:-$HOME/projects}"
+SSH_DIR="$HOME/.ssh"
+GITCONFIG_GLOBAL="$HOME/.gitconfig"
+
+# Single choke point for writes, so a dry run cannot write by accident.
+apply() {
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "  WOULD run: $*"
+    return 0
+  fi
+  "$@"
+}
+
+# '-' becomes '_', so the accounts check rejects aliases that collide here.
+ssh_key_path() {
+  printf '%s' "$SSH_DIR/id_ed25519_${1//-/_}"
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+contains() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# Sets globals on purpose. Each field is trimmed because " github.com" would
+# only fail at push time.
+parse_entry() {
+  IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$1"
+  alias="$(trim "$alias")"
+  hostname="$(trim "$hostname")"
+  ssh_user="$(trim "$ssh_user")"
+  folder="$(trim "$folder")"
+  # "work", "work/" and "./work" are one folder, and gitdir must never end in "//".
+  while [[ "$folder" == ./* ]]; do folder="${folder#./}"; done
+  while [[ "$folder" == *//* ]]; do folder="${folder//\/\//\/}"; done
+  while [[ "$folder" == */ ]]; do folder="${folder%/}"; done
+  name="$(trim "$name")"
+  email="$(trim "$email")"
+  https_user="$(trim "${https_user:-}")"
+}
+
+# gpg_fpr_for_email <email> [usable|expired]
+# The angle brackets force an exact match. A bare address also matches other user IDs.
+gpg_fpr_for_email() {
+  gpg --list-secret-keys --with-colons --fingerprint "<$1>" 2>/dev/null \
+    | awk -F: -v want="${2:-usable}" '
+        $1 == "sec" {
+          if (want == "expired") pick = ($2 == "e")
+          else pick = ($2 != "e" && $2 != "r" && $2 != "i" && $2 != "d")
+          next
+        }
+        $1 == "fpr" && pick { print $10; exit }
+      ' || true
+}
 
 # ---------------------------------------------------------------------------
 # Format of each line in the accounts file:
@@ -112,9 +186,14 @@ fi
 # Blank lines and lines starting with '#' are ignored.
 # ---------------------------------------------------------------------------
 ACCOUNTS=()
+SEEN_ALIASES=()
+SEEN_FOLDERS=()
+SEEN_KEYS=()
+lineno=0
 while IFS= read -r line || [ -n "$line" ]; do
+  lineno=$((lineno + 1))
   # Strip surrounding whitespace
-  trimmed="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  trimmed="$(trim "$line")"
   # Skip blank lines and comments
   [ -z "$trimmed" ] && continue
   case "$trimmed" in
@@ -122,11 +201,55 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
   field_count="$(awk -F'|' '{print NF}' <<< "$trimmed")"
   if [ "$field_count" -lt 6 ] || [ "$field_count" -gt 7 ]; then
-    echo "ERROR: invalid line in $ACCOUNTS_FILE" >&2
+    echo "ERROR: invalid line $lineno in $ACCOUNTS_FILE" >&2
     echo "  expected 6 or 7 '|'-separated fields, got $field_count:" >&2
     echo "  $trimmed" >&2
     exit 1
   fi
+  parse_entry "$trimmed"
+
+  missing=""
+  [ -n "$alias" ]    || missing+=" alias"
+  [ -n "$hostname" ] || missing+=" hostname"
+  [ -n "$folder" ]   || missing+=" project_folder"
+  [ -n "$name" ]     || missing+=" git_name"
+  [ -n "$email" ]    || missing+=" git_email"
+  if [ -n "$missing" ]; then
+    echo "ERROR: line $lineno in $ACCOUNTS_FILE has empty required field(s):$missing" >&2
+    echo "  $trimmed" >&2
+    exit 1
+  fi
+  case "$alias" in
+    *[!A-Za-z0-9._-]*|.*)
+      echo "ERROR: line $lineno in $ACCOUNTS_FILE has an unusable alias '$alias'." >&2
+      echo "  The alias becomes a filename (~/.gitconfig-<alias>); allowed are" >&2
+      echo "  letters, digits, '.', '_' and '-', and it must not start with '.'." >&2
+      exit 1
+      ;;
+  esac
+  if contains "$alias" ${SEEN_ALIASES[@]+"${SEEN_ALIASES[@]}"}; then
+    echo "ERROR: line $lineno in $ACCOUNTS_FILE reuses the alias '$alias'." >&2
+    echo "  Both accounts would share ~/.gitconfig-$alias and overwrite each other." >&2
+    exit 1
+  fi
+  if contains "$folder" ${SEEN_FOLDERS[@]+"${SEEN_FOLDERS[@]}"}; then
+    echo "ERROR: line $lineno in $ACCOUNTS_FILE reuses the project_folder '$folder'." >&2
+    echo "  A project directory can only map to one account - give '$alias' its own folder." >&2
+    exit 1
+  fi
+  key_file="$(ssh_key_path "$alias")"
+  for i in ${SEEN_KEYS[@]+"${!SEEN_KEYS[@]}"}; do
+    if [ "${SEEN_KEYS[i]}" = "$key_file" ]; then
+      echo "ERROR: line $lineno in $ACCOUNTS_FILE: alias '$alias' and alias '${SEEN_ALIASES[i]}'" >&2
+      echo "  map to the same SSH key file $key_file ('-' becomes '_')," >&2
+      echo "  so the second account would silently reuse the first one's key." >&2
+      exit 1
+    fi
+  done
+  SEEN_ALIASES+=("$alias")
+  SEEN_FOLDERS+=("$folder")
+  SEEN_KEYS+=("$key_file")
+
   ACCOUNTS+=("$trimmed")
 done < "$ACCOUNTS_FILE"
 
@@ -135,11 +258,32 @@ if [ "${#ACCOUNTS[@]}" -eq 0 ]; then
   exit 1
 fi
 
-PROJECT_BASE="${PROJECT_BASE:-$HOME/projects}"
-SSH_DIR="$HOME/.ssh"
-GITCONFIG_GLOBAL="$HOME/.gitconfig"
+# PRUNE deletes only files starting with this line. It names the alias, so a
+# copied backup such as .gitconfig-work.bak does not match its own filename.
+config_marker() {
+  printf '# managed by setup-git-hosts.sh (alias: %s) - do not edit, it is regenerated' "$1"
+}
 
-touch "$GITCONFIG_GLOBAL"
+has_marker() {   # has_marker <file> <alias>
+  [ -f "$1" ] && [ "$(head -n 1 "$1")" = "$(config_marker "$2")" ]
+}
+
+is_managed_config() {
+  local suffix="${1##*/.gitconfig-}"
+  has_marker "$1" "$suffix"
+}
+
+# Built before the main loop, which must not flag a folder another current
+# account is handing over in the same run.
+KNOWN_CONFIGS=()
+for entry in "${ACCOUNTS[@]}"; do
+  parse_entry "$entry"
+  KNOWN_CONFIGS+=("$HOME/.gitconfig-$alias")
+done
+
+is_known_config() {
+  contains "$1" ${KNOWN_CONFIGS[@]+"${KNOWN_CONFIGS[@]}"}
+}
 
 if ! command -v gpg >/dev/null 2>&1; then
   echo "ERROR: 'gpg' not found. Please install GnuPG (e.g. 'apt install gnupg' or 'brew install gnupg') and run again." >&2
@@ -190,9 +334,6 @@ detect_credential_helper() {
 
 CRED_HELPER="$(detect_credential_helper)"
 
-DRY_RUN="${DRY_RUN:-0}"
-PRUNE="${PRUNE:-0}"
-
 # ---------------------------------------------------------------------------
 # Update detection
 #
@@ -238,24 +379,53 @@ report_config_diff() {
   return $changed
 }
 
-# All gitdirs currently mapped to a given ~/.gitconfig-<alias> file, one per
-# line. Lets the script recognise a renamed project folder (same config file,
-# different gitdir) instead of appending a second, contradicting entry.
-includeif_gitdirs_for() {
-  local target="$1" line key value
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    key="${line%% *}"
-    value="${line#* }"
-    [ "$value" = "$target" ] || continue
+# Every includeIf entry as "<gitdir>\t<config path>". -z because gitdirs may
+# contain spaces, which break the key/value split.
+includeif_entries() {
+  local record key value
+  while IFS= read -r -d '' record; do
+    [ -z "$record" ] && continue
+    key="${record%%$'\n'*}"
+    value="${record#*$'\n'}"
     key="${key#includeif.gitdir:}"
-    echo "${key%.path}"
-  done < <(git config --file "$GITCONFIG_GLOBAL" --get-regexp '^includeif\.gitdir:' 2>/dev/null || true)
+    printf '%s\t%s\n' "${key%.path}" "$value"
+  done < <(git config --file "$GITCONFIG_GLOBAL" --get-regexp -z '^includeif\.gitdir:' 2>/dev/null || true)
 }
 
-# Remove one includeIf entry (section header included) from ~/.gitconfig.
+# includeif_lookup gitdirs-for <config path> | configs-for <gitdir>
+# Re-reads ~/.gitconfig on every call because the main loop modifies it.
+includeif_lookup() {
+  local mode="$1" want="$2" entry gitdir cfg
+  while IFS= read -r entry; do
+    gitdir="${entry%%$'\t'*}"
+    cfg="${entry#*$'\t'}"
+    case "$mode" in
+      gitdirs-for) [ "$cfg" = "$want" ]    && printf '%s\n' "$gitdir" ;;
+      configs-for) [ "$gitdir" = "$want" ] && printf '%s\n' "$cfg" ;;
+    esac
+  done < <(includeif_entries)
+  return 0
+}
+
+# Hand-rolled because --fixed-value needs git 2.30.
+regex_escape() {
+  local s="$1" out="" c i
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      '.'|'['|']'|\\|'('|')'|'*'|'+'|'?'|'{'|'}'|'|'|'^'|'$') out+="\\$c" ;;
+      *) out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Removes only the entry for this config. --remove-section would also drop
+# another account's entry for the same gitdir.
 remove_includeif() {
-  git config --file "$GITCONFIG_GLOBAL" --remove-section "includeIf.gitdir:$1" 2>/dev/null || true
+  local gitdir="$1" cfg_path="$2"
+  git config --file "$GITCONFIG_GLOBAL" --unset-all \
+    "includeIf.gitdir:$gitdir.path" "^$(regex_escape "$cfg_path")\$" 2>/dev/null || true
 }
 
 # Validate the protocol combination and count how many accounts use SSH /
@@ -263,39 +433,45 @@ remove_includeif() {
 SSH_ACCOUNTS=0
 HTTPS_ACCOUNTS=0
 for entry in "${ACCOUNTS[@]}"; do
-  IFS='|' read -r e_alias e_hostname e_ssh_user e_folder e_name e_email e_https_user <<< "$entry"
-  e_https_user="${e_https_user:-}"
-  if [ -z "$e_ssh_user" ] && [ -z "$e_https_user" ]; then
-    echo "ERROR: account '$e_alias' has neither an ssh_user nor an https_user." >&2
+  parse_entry "$entry"
+  if [ -z "$ssh_user" ] && [ -z "$https_user" ]; then
+    echo "ERROR: account '$alias' has neither an ssh_user nor an https_user." >&2
     echo "  Set ssh_user (usually 'git') for SSH, https_user for HTTPS, or both." >&2
     exit 1
   fi
-  if [ -n "$e_ssh_user" ]; then
+  if [ -n "$ssh_user" ]; then
     SSH_ACCOUNTS=$((SSH_ACCOUNTS + 1))
   fi
-  if [ -n "$e_https_user" ]; then
+  if [ -n "$https_user" ]; then
     HTTPS_ACCOUNTS=$((HTTPS_ACCOUNTS + 1))
   fi
 done
-
-# Only touch ~/.ssh if at least one account actually uses SSH.
-if [ "$SSH_ACCOUNTS" -gt 0 ]; then
-  mkdir -p "$SSH_DIR"
-  chmod 700 "$SSH_DIR"
-fi
 
 echo "== Git multi-host setup (SSH / HTTPS + GPG) =="
 if [ "$DRY_RUN" = "1" ]; then
   echo "   DRY_RUN=1: nothing is written, only the pending changes are shown."
 fi
 echo "   Accounts file: $ACCOUNTS_FILE"
+
+# Guarded so a dry run lists only pending writes. Creating ~/.gitconfig on an
+# XDG-only setup would redirect every future global write.
+[ -e "$GITCONFIG_GLOBAL" ] || apply touch "$GITCONFIG_GLOBAL"
+
+# Only touch ~/.ssh if at least one account actually uses SSH.
+if [ "$SSH_ACCOUNTS" -gt 0 ]; then
+  [ -d "$SSH_DIR" ] || apply mkdir -p "$SSH_DIR"
+  if [ -z "$(find "$SSH_DIR" -maxdepth 0 -perm 700 2>/dev/null)" ]; then
+    apply chmod 700 "$SSH_DIR"
+  fi
+fi
 echo
 
-for entry in "${ACCOUNTS[@]}"; do
-  IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
-  https_user="${https_user:-}"
+ACCOUNT_FPRS=()   # GPG fingerprint per account, same order as ACCOUNTS
 
-  key_path="$SSH_DIR/id_ed25519_${alias//-/_}"
+for entry in "${ACCOUNTS[@]}"; do
+  parse_entry "$entry"
+
+  key_path="$(ssh_key_path "$alias")"
   project_path="$PROJECT_BASE/$folder"
   gitconfig_path="$HOME/.gitconfig-$alias"
 
@@ -314,18 +490,41 @@ for entry in "${ACCOUNTS[@]}"; do
     echo "  SSH key created: $key_path"
   fi
 
-  # 2. Create a GPG key unless one already exists for this e-mail
-  existing_fpr="$(gpg --list-secret-keys --with-colons --fingerprint "$email" 2>/dev/null \
-                    | awk -F: '/^fpr:/ {print $10; exit}' || true)"
+  # 2. Reuse a usable GPG key, extend an expired one, otherwise create one.
+  existing_fpr="$(gpg_fpr_for_email "$email")"
+  expired_fpr=""
+  [ -n "$existing_fpr" ] || expired_fpr="$(gpg_fpr_for_email "$email" expired)"
+  show_fpr="$existing_fpr"   # what "Next steps" prints; empty = no key yet
 
   if [ -n "$existing_fpr" ]; then
     gpg_fpr="$existing_fpr"
     echo "  GPG key already exists for $email (skipped): $gpg_fpr"
+  elif [ -n "$expired_fpr" ]; then
+    # Extending keeps the fingerprint the forge already knows. A new key would
+    # make every commit show as "Unverified". Revoked keys get a new key below.
+    gpg_fpr="$expired_fpr"
+    show_fpr="$expired_fpr"
+    extend_cmd="gpg --quick-set-expire $expired_fpr 2y && gpg --quick-set-expire $expired_fpr 2y '*'"
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "  GPG key for $email is EXPIRED and WOULD BE extended by 2 years: $gpg_fpr"
+    elif gpg --batch --pinentry-mode loopback --passphrase '' \
+           --quick-set-expire "$expired_fpr" 2y >/dev/null 2>&1 \
+         && gpg --batch --pinentry-mode loopback --passphrase '' \
+           --quick-set-expire "$expired_fpr" 2y '*' >/dev/null 2>&1 \
+         && [ "$(gpg_fpr_for_email "$email")" = "$expired_fpr" ]; then
+      echo "  GPG key for $email was expired - extended by 2 years: $gpg_fpr"
+      CHANGE_HINTS+=("$alias: GPG key $gpg_fpr was extended - re-upload its public key to $hostname, the copy there still shows the old expiry")
+    else
+      # Probably protected by a passphrase. Rotating to a new key is the user's call.
+      echo "  GPG key for $email is EXPIRED and could not be extended automatically: $gpg_fpr"
+      CHANGE_HINTS+=("$alias: GPG key $gpg_fpr has expired, commits cannot be signed - extend it with: $extend_cmd (then re-upload the public key to $hostname)")
+    fi
   elif [ "$DRY_RUN" = "1" ]; then
     gpg_fpr="<new key for $email>"
     echo "  GPG key WOULD BE created for $email"
   else
-    gpg_batch_file="$(mktemp)"
+    gpg_batch_file="$(mktemp)"; TMP_FILES+=("$gpg_batch_file")
+    gpg_err_file="$(mktemp)"; TMP_FILES+=("$gpg_err_file")
     cat > "$gpg_batch_file" <<EOF
 %no-protection
 Key-Type: eddsa
@@ -339,13 +538,27 @@ Name-Email: $email
 Expire-Date: 2y
 %commit
 EOF
-    gpg --batch --generate-key "$gpg_batch_file" >/dev/null 2>&1
-    rm -f "$gpg_batch_file"
+    if ! gpg --batch --generate-key "$gpg_batch_file" >/dev/null 2>"$gpg_err_file"; then
+      echo "ERROR: gpg could not create a key for $email:" >&2
+      sed 's/^/  /' "$gpg_err_file" >&2
+      rm -f "$gpg_batch_file" "$gpg_err_file"
+      exit 1
+    fi
+    rm -f "$gpg_batch_file" "$gpg_err_file"
 
-    gpg_fpr="$(gpg --list-secret-keys --with-colons --fingerprint "$email" 2>/dev/null \
-                 | awk -F: '/^fpr:/ {print $10; exit}' || true)"
+    # gpg can exit 0 without creating a key. An empty signingkey would break every
+    # commit and read as "unchanged" on the next run.
+    gpg_fpr="$(gpg_fpr_for_email "$email")"
+    if [ -z "$gpg_fpr" ]; then
+      echo "ERROR: gpg reported success but no usable secret key exists for $email." >&2
+      echo "  Check that gpg-agent can start ('gpg --batch --generate-key' by hand)" >&2
+      echo "  and run again. $gitconfig_path was left untouched." >&2
+      exit 1
+    fi
     echo "  GPG key created for $email: $gpg_fpr"
+    show_fpr="$gpg_fpr"
   fi
+  ACCOUNT_FPRS+=("$show_fpr")
 
   # 3. Create the project directory
   if [ -d "$project_path" ]; then
@@ -360,8 +573,9 @@ EOF
   # 4. Render the desired directory-specific git config (identity + GPG
   #    signing, plus core.sshCommand and/or the HTTPS username) into a
   #    temporary file, so it can be compared against what is already there.
-  desired_cfg="$(mktemp)"
+  desired_cfg="$(mktemp)"; TMP_FILES+=("$desired_cfg")
   cat > "$desired_cfg" <<EOF
+$(config_marker "$alias")
 [user]
     name = $name
     email = $email
@@ -404,7 +618,15 @@ EOF
     report_config_diff /dev/null "$desired_cfg" "      " || true
   elif report_config_diff "$gitconfig_path" "$desired_cfg" "      "; then
     UNCHANGED=$((UNCHANGED + 1))
-    echo "  Git config unchanged: $gitconfig_path"
+    # The marker is invisible to the value diff, so older configs would never get it.
+    if has_marker "$gitconfig_path" "$alias"; then
+      echo "  Git config unchanged: $gitconfig_path"
+    elif [ "$DRY_RUN" = "1" ]; then
+      echo "  Git config unchanged, marker line WOULD BE added: $gitconfig_path"
+    else
+      cat "$desired_cfg" > "$gitconfig_path"
+      echo "  Git config unchanged (marker line added): $gitconfig_path"
+    fi
   else
     UPDATED=$((UPDATED + 1))
     if [ "$DRY_RUN" = "1" ]; then
@@ -424,12 +646,26 @@ EOF
   mapped_gitdirs=()
   while IFS= read -r g; do
     [ -n "$g" ] && mapped_gitdirs+=("$g")
-  done < <(includeif_gitdirs_for "$gitconfig_path")
+  done < <(includeif_lookup gitdirs-for "$gitconfig_path")
 
   already_mapped=0
   for g in ${mapped_gitdirs[@]+"${mapped_gitdirs[@]}"}; do
     [ "$g" = "$desired_gitdir" ] && already_mapped=1
   done
+
+  # A current account's entry is a handover that its own pass removes later.
+  # Anything else is a leftover worth reporting.
+  while IFS= read -r other_cfg; do
+    [ -z "$other_cfg" ] && continue
+    [ "$other_cfg" = "$gitconfig_path" ] && continue
+    is_known_config "$other_cfg" && continue
+    if is_managed_config "$other_cfg" || [ ! -e "$other_cfg" ]; then
+      fix="run with PRUNE=1"
+    else
+      fix="remove that [includeIf] section from ~/.gitconfig by hand"
+    fi
+    CHANGE_HINTS+=("$alias: $desired_gitdir is also mapped to $other_cfg - $fix so the right config always wins")
+  done < <(includeif_lookup configs-for "$desired_gitdir")
 
   if [ "$already_mapped" = "1" ]; then
     echo "  includeIf entry already exists (skipped)"
@@ -453,7 +689,7 @@ EOF
     if [ "$DRY_RUN" = "1" ]; then
       echo "  stale includeIf entry WOULD BE removed: gitdir:$g"
     else
-      remove_includeif "$g"
+      remove_includeif "$g" "$gitconfig_path"
       echo "  stale includeIf entry removed: gitdir:$g"
     fi
     if [ -d "${g%/}" ]; then
@@ -497,45 +733,41 @@ fi
 # removing config the user may still need is not something to do silently.
 # SSH and GPG keys are never deleted here.
 # ---------------------------------------------------------------------------
-KNOWN_CONFIGS=()
-for entry in "${ACCOUNTS[@]}"; do
-  IFS='|' read -r k_alias _rest <<< "$entry"
-  KNOWN_CONFIGS+=("$HOME/.gitconfig-$k_alias")
-done
-
-is_known_config() {
-  local candidate="$1" known
-  for known in ${KNOWN_CONFIGS[@]+"${KNOWN_CONFIGS[@]}"}; do
-    [ "$known" = "$candidate" ] && return 0
-  done
-  return 1
-}
-
+# Only what this script wrote is removed. Everything else is reported as unmanaged.
 ORPHANS=0
+UNMANAGED=0
 
-# a) includeIf entries pointing at a config that no account owns any more
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  ii_key="${line%% *}"
-  ii_path="${line#* }"
+# a) includeIf entries pointing at a config that no account owns any more.
+#    Kept when the target is a user file, since removing it would unwire its repos.
+while IFS= read -r ii_entry; do
+  ii_gitdir="${ii_entry%%$'\t'*}"
+  ii_path="${ii_entry#*$'\t'}"
   is_known_config "$ii_path" && continue
-  ii_gitdir="${ii_key#includeif.gitdir:}"
-  ii_gitdir="${ii_gitdir%.path}"
+  if [ -e "$ii_path" ] && ! is_managed_config "$ii_path"; then
+    UNMANAGED=$((UNMANAGED + 1))
+    echo "includeIf entry for an unmanaged config, not touched: gitdir:$ii_gitdir -> $ii_path"
+    continue
+  fi
   ORPHANS=$((ORPHANS + 1))
   if [ "$PRUNE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
-    remove_includeif "$ii_gitdir"
+    remove_includeif "$ii_gitdir" "$ii_path"
     echo "Removed orphaned includeIf entry: gitdir:$ii_gitdir -> $ii_path"
   elif [ "$PRUNE" = "1" ]; then
     echo "Orphaned includeIf entry WOULD BE removed: gitdir:$ii_gitdir -> $ii_path"
   else
     echo "Orphaned includeIf entry in ~/.gitconfig: gitdir:$ii_gitdir -> $ii_path"
   fi
-done < <(git config --file "$GITCONFIG_GLOBAL" --get-regexp '^includeif\.gitdir:' 2>/dev/null || true)
+done < <(includeif_entries)
 
 # b) ~/.gitconfig-<alias> files without a matching account
 for cfg in "$HOME"/.gitconfig-*; do
   [ -f "$cfg" ] || continue
   is_known_config "$cfg" && continue
+  if ! is_managed_config "$cfg"; then
+    UNMANAGED=$((UNMANAGED + 1))
+    echo "Unmanaged git config, not touched: $cfg"
+    continue
+  fi
   ORPHANS=$((ORPHANS + 1))
   if [ "$PRUNE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
     rm -f "$cfg"
@@ -547,11 +779,15 @@ for cfg in "$HOME"/.gitconfig-*; do
   fi
 done
 
-if [ "$ORPHANS" -gt 0 ]; then
-  if [ "$PRUNE" != "1" ]; then
-    echo "  -> left untouched; run with PRUNE=1 to remove them"
-    echo "     (SSH and GPG keys are never deleted, remove those by hand)"
-  fi
+if [ "$ORPHANS" -gt 0 ] && [ "$PRUNE" != "1" ]; then
+  echo "  -> left untouched; run with PRUNE=1 to remove them"
+  echo "     (SSH and GPG keys are never deleted, remove those by hand)"
+fi
+if [ "$UNMANAGED" -gt 0 ]; then
+  echo "  -> unmanaged = not written by this script (no matching marker line);"
+  echo "     PRUNE never removes those - delete them by hand if no longer needed"
+fi
+if [ $((ORPHANS + UNMANAGED)) -gt 0 ]; then
   echo
 fi
 
@@ -582,7 +818,7 @@ if [ "$ORPHANS" -gt 0 ] && [ "$PRUNE" = "1" ]; then
 fi
 echo "Summary: ${#ACCOUNTS[@]} account(s) in $(basename "$ACCOUNTS_FILE") - \
 $CREATED created, $UPDATED updated, $UNCHANGED unchanged, $REMAPPED includeIf added/moved, \
-$ORPHANS leftover(s)$orphan_note"
+$ORPHANS leftover(s)$orphan_note, $UNMANAGED unmanaged (not touched)"
 if [ "${#CHANGE_HINTS[@]}" -gt 0 ]; then
   echo
   echo "Needs your attention:"
@@ -607,11 +843,11 @@ step() {
 if [ "$SSH_ACCOUNTS" -gt 0 ]; then
   step "Add the SSH public keys to the respective hosts (Settings -> SSH keys):"
   for entry in "${ACCOUNTS[@]}"; do
-    IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
+    parse_entry "$entry"
     if [ -z "$ssh_user" ]; then
       continue
     fi
-    key_path="$SSH_DIR/id_ed25519_${alias//-/_}.pub"
+    key_path="$(ssh_key_path "$alias").pub"
     echo "   - $alias ($hostname): $key_path"
     echo "       show:  cat $key_path"
     if [ -n "$CLIP_CMD" ]; then
@@ -621,14 +857,19 @@ if [ "$SSH_ACCOUNTS" -gt 0 ]; then
   echo
 fi
 step "Add the GPG public keys to the respective hosts (Settings -> GPG keys):"
-for entry in "${ACCOUNTS[@]}"; do
-  IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
-  https_user="${https_user:-}"
-  fpr="$(gpg --list-secret-keys --with-colons --fingerprint "$email" 2>/dev/null | awk -F: '/^fpr:/ {print $10; exit}' || true)"
+for i in "${!ACCOUNTS[@]}"; do
+  parse_entry "${ACCOUNTS[i]}"
+  # The fingerprint that was actually written into the config.
+  fpr="${ACCOUNT_FPRS[i]}"
   echo "   - $alias ($email):"
-  echo "       show:  gpg --armor --export $fpr"
-  if [ -n "$CLIP_CMD" ]; then
-    echo "       copy:  gpg --armor --export $fpr | $CLIP_CMD"
+  if [ -n "$fpr" ]; then
+    echo "       show:  gpg --armor --export $fpr"
+    if [ -n "$CLIP_CMD" ]; then
+      echo "       copy:  gpg --armor --export $fpr | $CLIP_CMD"
+    fi
+  else
+    # A bare 'gpg --armor --export' would export the whole keyring.
+    echo "       (no key yet - re-run without DRY_RUN=1 to create it)"
   fi
 done
 echo
@@ -648,11 +889,11 @@ echo
 if [ "$SSH_ACCOUNTS" -gt 0 ]; then
   step "Test the SSH connection, e.g.:"
   for entry in "${ACCOUNTS[@]}"; do
-    IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
+    parse_entry "$entry"
     if [ -z "$ssh_user" ]; then
       continue
     fi
-    key_path="$SSH_DIR/id_ed25519_${alias//-/_}"
+    key_path="$(ssh_key_path "$alias")"
     echo "   ssh -i $key_path -T $ssh_user@$hostname"
   done
   echo
@@ -664,9 +905,8 @@ echo "   the SSH key / HTTPS username is passed explicitly below. Everything"
 echo "   after the clone (fetch, push, commit) picks it up automatically."
 echo
 for entry in "${ACCOUNTS[@]}"; do
-  IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$entry"
-  https_user="${https_user:-}"
-  key_path="$SSH_DIR/id_ed25519_${alias//-/_}"
+  parse_entry "$entry"
+  key_path="$(ssh_key_path "$alias")"
   echo "   - $alias -> $PROJECT_BASE/$folder/repo"
   if [ -n "$ssh_user" ]; then
     echo "       SSH:    git -c core.sshCommand=\"ssh -i $key_path -o IdentitiesOnly=yes\" \\"
@@ -700,7 +940,8 @@ if [ "$HTTPS_ACCOUNTS" -gt 0 ]; then
   echo "   - Test access without cloning (asks for the token once):"
   echo "       git ls-remote https://<user>@<host>/org/repo.git"
   echo "   - To replace a stored token, just erase it and push again:"
-  echo "       printf 'protocol=https\\nhost=<host>\\nusername=<user>\\n\\n' | git credential reject"
+  # printf because some shells' echo would expand the \n.
+  printf '%s\n' "       printf 'protocol=https\\nhost=<host>\\nusername=<user>\\n\\n' | git credential reject"
   echo
 fi
 step "Inside a project directory, verify that identity and signing are active:"

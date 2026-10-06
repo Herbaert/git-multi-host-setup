@@ -55,7 +55,13 @@ For every account defined in the accounts file, it automatically:
    Every account needs at least one of `ssh_user` / `https_user`; the script
    aborts if both are missing.
 
-   Blank lines and lines starting with `#` are ignored.
+   Blank lines and lines starting with `#` are ignored. Whitespace around fields
+   is stripped, and `work`, `work/` and `./work` name the same folder.
+
+   The script aborts on an empty required field, on an `alias` with characters
+   other than letters, digits, `.`, `_`, `-`, and on two accounts sharing an
+   `alias`, a `project_folder` or an SSH key file (`acme-dev` and `acme_dev`
+   both map to `~/.ssh/id_ed25519_acme_dev`).
 
    By default `accounts.conf` is expected in the same directory as the script. A
    different file can be passed via `./setup-git-hosts.sh /path/to/other.conf`
@@ -79,7 +85,7 @@ For every account defined in the accounts file, it automatically:
    | `CREDENTIAL_CACHE_TIMEOUT` | `86400` | timeout in seconds, only used for the `cache` fallback |
    | `SETUP_CREDENTIAL_HELPER` | `1` | set to `0` to never touch the global `credential.helper` |
    | `DRY_RUN` | `0` | set to `1` to only show what would change, without writing anything |
-   | `PRUNE` | `0` | set to `1` to also remove leftovers of accounts no longer in the accounts file |
+   | `PRUNE` | `0` | set to `1` to also remove leftovers of accounts no longer in the accounts file (see [Removed accounts](#idempotency--updates)) |
 
 2. Run it:
 
@@ -181,7 +187,7 @@ git remote set-url origin git@github.com:org/repo.git                   # HTTPS 
 
 The script is safe to run repeatedly and doubles as an **update mechanism**: edit `accounts.conf` and run it again, and it reconciles the files on disk with what the accounts file now says.
 
-- **SSH/GPG keys, directories** – created if missing, left alone otherwise (a changed `git_email` does **not** regenerate the GPG key; delete the old one yourself if you really want a new one).
+- **SSH/GPG keys, directories** – created if missing, left alone otherwise (a changed `git_email` does **not** regenerate the GPG key; delete the old one yourself if you really want a new one). A GPG key must match the e-mail exactly. An expired key is extended by 2 years and keeps its fingerprint, so you only re-upload the public key. If that fails, the run prints the command instead of creating a new key.
 - **`~/.gitconfig-<alias>`** – compared setting by setting against what the account line now produces. Every difference is printed before it's applied, e.g.:
   ```
   ~ user.name: Old Name -> New Name
@@ -190,6 +196,8 @@ The script is safe to run repeatedly and doubles as an **update mechanism**: edi
   ```
 - **`includeIf` entries** – if `project_folder` changes, the entry is moved to the new path instead of adding a second, contradicting one. The old directory is reported under "Needs your attention" if it still exists on disk (repos in it keep using the old config until moved).
 - **Removed accounts** – deleting a line from `accounts.conf` does **not** delete anything by default, so the leftover `~/.gitconfig-<alias>` and `includeIf` entry are only reported for you to decide. Add `PRUNE=1` to remove them (SSH and GPG keys are never touched by prune – remove those by hand if no longer needed).
+
+  `PRUNE` only removes files whose first line is the script's marker for that alias, plus their `includeIf` entries. Hand-written configs and backups such as `~/.gitconfig-work.bak` stay and are counted as *unmanaged*. Configs from older versions get the marker on the next run.
 
 Preview any change before committing to it:
 
