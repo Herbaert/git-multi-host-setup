@@ -224,6 +224,20 @@ passwd
 
 For HTTPS, no password or token ever ends up in a git config file – only the username does. The token is kept by the credential helper: in the system keychain/keyring (`osxkeychain`, `libsecret`, `manager`) or, with the `cache` fallback, in memory until the timeout expires. Avoid `credential.helper store`, which writes tokens in plain text to `~/.git-credentials`.
 
+
+### Git config in ~/.config/git
+
+If your default `user.email` is set in `~/.config/git/config` (or `$XDG_CONFIG_HOME/git/config`) and `~/.gitconfig` has no `[user]` settings, the script leaves `~/.gitconfig` alone and keeps everything next to your config instead:
+
+- `~/.config/git/host-<alias>.conf` instead of `~/.gitconfig-<alias>`
+- the `includeIf` entries in `~/.config/git/hosts.conf`
+- these lines appended once to the end of `~/.config/git/config`, after your default identity so the account configs win:
+
+  ```ini
+  [include]
+      path = ~/.config/git/hosts.conf
+  ```
+
 ## License
 
 MIT – see [LICENSE](./LICENSE).

@@ -100,6 +100,53 @@ t_unmanaged_quiet() { new_sandbox
   run DRY_RUN=1 >/dev/null
   echo "normal_lines=$normal,summary=$summary,dry_run_lines=$(count 'config, not touched' < "$SB/out.txt")"; }
 
+# --- identity in ~/.config/git/config -------------------------------------------
+t_xdg_only() { new_sandbox; xdg_identity
+  printf 'a|github.com|git|fa|A|a@x.io\n' > "$ACC"; run >/dev/null
+  echo "email=$(repo_email fa),outside=$(git -C "$HOME" config user.email),config=$(exists "$CFG/host-a.conf"),gitconfig=$(exists "$HOME/.gitconfig"),path=$(git config --file "$CFG/config" --get include.path)"; }
+
+# 'git config --global' would only read ~/.gitconfig here and miss the e-mail.
+t_xdg_beside_gitconfig() { new_sandbox; xdg_identity
+  printf '[credential]\n\thelper = cache\n' > "$HOME/.gitconfig"
+  printf 'a|github.com|git|fa|A|a@x.io\n' > "$ACC"; run >/dev/null
+  echo "email=$(repo_email fa),in_xdg=$(includeifs "$CFG/hosts.conf" | count 'host-a'),in_home=$(includeifs | count .)"; }
+
+t_xdg_config_without_identity() { new_sandbox
+  mkdir -p "$CFG"
+  printf '[credential]\n\thelper = cache\n' > "$CFG/config"
+  printf 'a|github.com|git|fa|A|a@x.io\n' > "$ACC"; run >/dev/null
+  echo "home=$(exists "$HOME/.gitconfig-a"),xdg=$(exists "$CFG/host-a.conf")"; }
+
+t_xdg_home_user_setting() { new_sandbox; xdg_identity
+  printf '[user]\n\tname = Home\n' > "$HOME/.gitconfig"
+  printf 'a|github.com|git|fa|A|a@x.io\n' > "$ACC"; run >/dev/null
+  echo "home=$(exists "$HOME/.gitconfig-a"),xdg=$(exists "$CFG/host-a.conf"),email=$(repo_email fa)"; }
+
+# A dotfile manager owns ~/.config/git/config and already includes hosts.conf.
+t_xdg_include_present() { new_sandbox; xdg_identity
+  printf '[include]\n\tpath = hosts.conf\n' >> "$CFG/config"
+  cp "$CFG/config" "$SB/c0"
+  printf 'a|github.com|git|fa|A|a@x.io\n' > "$ACC"; run >/dev/null; run >/dev/null
+  local same=no
+  cmp -s "$SB/c0" "$CFG/config" && same=yes
+  echo "email=$(repo_email fa),untouched=$same,gitconfig=$(exists "$HOME/.gitconfig")"; }
+
+# Set up in ~/.gitconfig first, then the identity moved to ~/.config/git/config.
+t_xdg_after_gitconfig() { new_sandbox
+  printf 'a|github.com|git|fa|A|a@x.io\n' > "$ACC"; run >/dev/null
+  xdg_identity
+  run >/dev/null
+  local hint
+  hint="$(count 'also mapped' < "$SB/out.txt")"
+  run PRUNE=1 >/dev/null
+  echo "hint=$hint,old_config=$(exists "$HOME/.gitconfig-a"),old_entry=$(includeifs | count 'gitconfig-a'),email=$(repo_email fa)"; }
+
+t_home_after_xdg() { new_sandbox; xdg_identity
+  printf 'a|github.com|git|fa|A|a@x.io\n' > "$ACC"; run >/dev/null
+  printf '[user]\n\tname = Home\n' > "$HOME/.gitconfig"
+  run PRUNE=1 >/dev/null
+  echo "xdg_config=$(exists "$CFG/host-a.conf"),xdg_entry=$(includeifs "$CFG/hosts.conf" | count 'host-a'),home_config=$(exists "$HOME/.gitconfig-a"),home_entry=$(includeifs | count 'gitconfig-a')"; }
+
 # --- DRY_RUN -------------------------------------------------------------------
 t_dry_run() { new_sandbox
   printf 'a|github.com|git|f|A|a@x.io\n' > "$ACC"; run DRY_RUN=1 >/dev/null
@@ -189,6 +236,18 @@ check "keeps hand-written config + wiring"  "file=yes,includeIf=1"   "$(t_prune_
 check "marker backfilled on old configs"    "marker=1,unchanged=1"   "$(t_marker_backfill)"
 check "unmanaged files listed only on DRY_RUN/PRUNE" \
       "normal_lines=0,summary=1 unmanaged,dry_run_lines=1"           "$(t_unmanaged_quiet)"
+
+banner "identity in ~/.config/git/config"
+check "XDG only: own files, include at the end, no ~/.gitconfig" \
+      "email=a@x.io,outside=default@x.io,config=yes,gitconfig=no,path=~/.config/git/hosts.conf" "$(t_xdg_only)"
+check "XDG identity beside ~/.gitconfig"    "email=a@x.io,in_xdg=1,in_home=0"       "$(t_xdg_beside_gitconfig)"
+check "XDG config without identity uses home layout" "home=yes,xdg=no"                  "$(t_xdg_config_without_identity)"
+check "home user settings use home layout"      "home=yes,xdg=no,email=a@x.io"        "$(t_xdg_home_user_setting)"
+check "existing include: config untouched"  "email=a@x.io,untouched=yes,gitconfig=no" "$(t_xdg_include_present)"
+check "moving to XDG: old setup reported, pruned" \
+      "hint=1,old_config=no,old_entry=0,email=a@x.io"                               "$(t_xdg_after_gitconfig)"
+check "moving back home: old XDG setup pruned" \
+      "xdg_config=no,xdg_entry=0,home_config=yes,home_entry=1"                         "$(t_home_after_xdg)"
 
 banner "DRY_RUN and idempotency"
 check "dry run writes nothing, previews setup" \

@@ -11,6 +11,11 @@
 #     GPG signing (user.signingkey, commit.gpgsign, tag.gpgsign) and - if an
 #     HTTPS username is configured - credential.<url>.username
 #   - includeIf entries in ~/.gitconfig
+#   (If your default identity lives in ~/.config/git/config instead, and
+#   ~/.gitconfig has no [user] settings, the per-account files go to
+#   ~/.config/git/host-<alias>.conf and the includeIf entries to
+#   ~/.config/git/hosts.conf, which is included once at the end of
+#   ~/.config/git/config.)
 #   - a global credential.helper (only if none is configured yet), so that
 #     HTTPS tokens are cached after the first prompt
 #   - project directories under $PROJECT_BASE (default ~/projects), if missing
@@ -109,7 +114,41 @@ PRUNE="${PRUNE:-0}"
 
 PROJECT_BASE="${PROJECT_BASE:-$HOME/projects}"
 SSH_DIR="$HOME/.ssh"
-GITCONFIG_GLOBAL="$HOME/.gitconfig"
+HOME_GITCONFIG="$HOME/.gitconfig"
+GIT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/git"
+
+# Git reads ~/.config/git/config first, then ~/.gitconfig. If the default
+# identity lives only in the former, the generated config goes next to it in
+# files of its own, because a dotfile manager may own that file. Otherwise
+# everything goes into ~/.gitconfig.
+uses_xdg_config() {
+  [ -z "${GIT_CONFIG_GLOBAL:-}" ] \
+    && [ -f "$GIT_CONFIG_DIR/config" ] \
+    && git config --file "$GIT_CONFIG_DIR/config" --get user.email >/dev/null 2>&1 \
+    && ! git config --file "$HOME_GITCONFIG" --get-regexp '^user\.' >/dev/null 2>&1
+}
+
+# GITCONFIG_GLOBAL is the file the includeIf entries go into.
+if uses_xdg_config; then
+  XDG_LAYOUT=1
+  GITCONFIG_GLOBAL="$GIT_CONFIG_DIR/hosts.conf"
+else
+  XDG_LAYOUT=0
+  GITCONFIG_GLOBAL="$HOME_GITCONFIG"
+fi
+
+account_config_path() {
+  if [ "$XDG_LAYOUT" = "1" ]; then
+    printf '%s' "$GIT_CONFIG_DIR/host-$1.conf"
+  else
+    printf '%s' "$HOME/.gitconfig-$1"
+  fi
+}
+
+# A path as shown in messages, e.g. ~/.gitconfig.
+shown() {
+  printf '%s' "${1/#$HOME/\~}"
+}
 
 # Single choke point for writes, so a dry run cannot write by accident.
 apply() {
@@ -264,14 +303,14 @@ while IFS= read -r line || [ -n "$line" ]; do
   case "$alias" in
     *[!A-Za-z0-9._-]*|.*)
       echo "ERROR: line $lineno in $ACCOUNTS_FILE has an unusable alias '$alias'." >&2
-      echo "  The alias becomes a filename (~/.gitconfig-<alias>); allowed are" >&2
+      echo "  The alias becomes a filename ($(shown "$(account_config_path '<alias>')")); allowed are" >&2
       echo "  letters, digits, '.', '_' and '-', and it must not start with '.'." >&2
       exit 1
       ;;
   esac
   if contains "$alias" ${SEEN_ALIASES[@]+"${SEEN_ALIASES[@]}"}; then
     echo "ERROR: line $lineno in $ACCOUNTS_FILE reuses the alias '$alias'." >&2
-    echo "  Both accounts would share ~/.gitconfig-$alias and overwrite each other." >&2
+    echo "  Both accounts would share $(shown "$(account_config_path "$alias")") and overwrite each other." >&2
     exit 1
   fi
   if contains "$folder" ${SEEN_FOLDERS[@]+"${SEEN_FOLDERS[@]}"}; then
@@ -312,6 +351,9 @@ has_marker() {   # has_marker <file> <alias>
 
 is_managed_config() {
   local suffix="${1##*/.gitconfig-}"
+  case "$1" in
+    "$GIT_CONFIG_DIR"/host-*.conf) suffix="${1#"$GIT_CONFIG_DIR"/host-}"; suffix="${suffix%.conf}" ;;
+  esac
   has_marker "$1" "$suffix"
 }
 
@@ -320,7 +362,7 @@ is_managed_config() {
 KNOWN_CONFIGS=()
 for entry in "${ACCOUNTS[@]}"; do
   parse_entry "$entry"
-  KNOWN_CONFIGS+=("$HOME/.gitconfig-$alias")
+  KNOWN_CONFIGS+=("$(account_config_path "$alias")")
 done
 
 is_known_config() {
@@ -445,20 +487,20 @@ report_config_diff() {
 # Every includeIf entry as "<gitdir>\t<config path>". -z because gitdirs may
 # contain spaces, which break the key/value split.
 includeif_entries() {
-  local record key value
+  local file="${1:-$GITCONFIG_GLOBAL}" record key value
   while IFS= read -r -d '' record; do
     [ -z "$record" ] && continue
     key="${record%%$'\n'*}"
     value="${record#*$'\n'}"
     key="${key#includeif.gitdir:}"
     printf '%s\t%s\n' "${key%.path}" "$value"
-  done < <(git config --file "$GITCONFIG_GLOBAL" --get-regexp -z '^includeif\.gitdir:' 2>/dev/null || true)
+  done < <(git config --file "$file" --get-regexp -z '^includeif\.gitdir:' 2>/dev/null || true)
 }
 
-# includeif_lookup gitdirs-for <config path> | configs-for <gitdir>
-# Re-reads ~/.gitconfig on every call because the main loop modifies it.
+# includeif_lookup gitdirs-for <config path> | configs-for <gitdir> [file]
+# Re-reads the file on every call because the main loop modifies it.
 includeif_lookup() {
-  local mode="$1" want="$2" entry gitdir cfg
+  local mode="$1" want="$2" file="${3:-$GITCONFIG_GLOBAL}" entry gitdir cfg
   while IFS= read -r entry; do
     gitdir="${entry%%$'\t'*}"
     cfg="${entry#*$'\t'}"
@@ -466,7 +508,7 @@ includeif_lookup() {
       gitdirs-for) [ "$cfg" = "$want" ]    && printf '%s\n' "$gitdir" ;;
       configs-for) [ "$gitdir" = "$want" ] && printf '%s\n' "$cfg" ;;
     esac
-  done < <(includeif_entries)
+  done < <(includeif_entries "$file")
   return 0
 }
 
@@ -486,10 +528,18 @@ regex_escape() {
 # Removes only the entry for this config. --remove-section would also drop
 # another account's entry for the same gitdir.
 remove_includeif() {
-  local gitdir="$1" cfg_path="$2"
-  git config --file "$GITCONFIG_GLOBAL" --unset-all \
+  local gitdir="$1" cfg_path="$2" file="${3:-$GITCONFIG_GLOBAL}"
+  git config --file "$file" --unset-all \
     "includeIf.gitdir:$gitdir.path" "^$(regex_escape "$cfg_path")\$" 2>/dev/null || true
 }
+
+# Check both generated include files so switching layouts can clean up the old
+# one. With the XDG layout, ~/.gitconfig may still hold entries from before the
+# identity moved there, and vice versa.
+INCLUDEIF_FILES=("$GITCONFIG_GLOBAL")
+for ii_file in "$HOME_GITCONFIG" "$GIT_CONFIG_DIR/hosts.conf"; do
+  [ "$ii_file" = "$GITCONFIG_GLOBAL" ] || INCLUDEIF_FILES+=("$ii_file")
+done
 
 # Validate the protocol combination and count how many accounts use SSH /
 # HTTPS, so that SSH-only and HTTPS-only setups stay free of the other half.
@@ -536,7 +586,7 @@ for entry in "${ACCOUNTS[@]}"; do
 
   key_path="$(ssh_key_path "$alias")"
   project_path="$(real_path "$PROJECT_BASE/$folder")"
-  gitconfig_path="$HOME/.gitconfig-$alias"
+  gitconfig_path="$(account_config_path "$alias")"
 
   echo "--- Account: $alias ---"
 
@@ -719,17 +769,19 @@ EOF
 
   # A current account's entry is a handover that its own pass removes later.
   # Anything else is a leftover worth reporting.
-  while IFS= read -r other_cfg; do
-    [ -z "$other_cfg" ] && continue
-    [ "$other_cfg" = "$gitconfig_path" ] && continue
-    is_known_config "$other_cfg" && continue
-    if is_managed_config "$other_cfg" || [ ! -e "$other_cfg" ]; then
-      fix="run with PRUNE=1"
-    else
-      fix="remove that [includeIf] section from ~/.gitconfig by hand"
-    fi
-    CHANGE_HINTS+=("$alias: $desired_gitdir is also mapped to $other_cfg - $fix so the right config always wins")
-  done < <(includeif_lookup configs-for "$desired_gitdir")
+  for ii_file in "${INCLUDEIF_FILES[@]}"; do
+    while IFS= read -r other_cfg; do
+      [ -z "$other_cfg" ] && continue
+      [ "$other_cfg" = "$gitconfig_path" ] && continue
+      is_known_config "$other_cfg" && continue
+      if is_managed_config "$other_cfg" || [ ! -e "$other_cfg" ]; then
+        fix="run with PRUNE=1"
+      else
+        fix="remove that [includeIf] section from $(shown "$ii_file") by hand"
+      fi
+      CHANGE_HINTS+=("$alias: $desired_gitdir is also mapped to $other_cfg - $fix so the right config always wins")
+    done < <(includeif_lookup configs-for "$desired_gitdir" "$ii_file")
+  done
 
   if [ "$already_mapped" = "1" ]; then
     echo "  includeIf entry already exists (skipped)"
@@ -743,7 +795,7 @@ EOF
       echo "    path = $gitconfig_path"
     } >> "$GITCONFIG_GLOBAL"
     REMAPPED=$((REMAPPED + 1))
-    echo "  includeIf entry appended to ~/.gitconfig: gitdir:$desired_gitdir"
+    echo "  includeIf entry appended to $(shown "$GITCONFIG_GLOBAL"): gitdir:$desired_gitdir"
   fi
 
   # Any other gitdir pointing at this config is stale (renamed folder or a
@@ -763,6 +815,49 @@ EOF
 
   echo
 done
+
+# ---------------------------------------------------------------------------
+# XDG layout only: ~/.config/git/config has to include hosts.conf, at the end
+# so the includeIf entries win over the default identity set there.
+# ---------------------------------------------------------------------------
+# Whether ~/.config/git/config or ~/.gitconfig includes hosts.conf. Like git,
+# relative paths are relative to the file containing them.
+hosts_config_included() {
+  local file path
+  for file in "$GIT_CONFIG_DIR/config" "$HOME_GITCONFIG"; do
+    [ -f "$file" ] || continue
+    while IFS= read -r path; do
+      # shellcheck disable=SC2088 # a literal '~/' as written in the config
+      case "$path" in
+        "~/"*) path="$HOME/${path#"~/"}" ;;
+        /*) ;;
+        *) path="$(dirname "$file")/$path" ;;
+      esac
+      if [ "$path" = "$GITCONFIG_GLOBAL" ] || [ "$path" -ef "$GITCONFIG_GLOBAL" ]; then
+        return 0
+      fi
+    done < <(git config --file "$file" --get-all include.path 2>/dev/null || true)
+  done
+  return 1
+}
+
+if [ "$XDG_LAYOUT" = "1" ]; then
+  include_target="$(shown "$GIT_CONFIG_DIR/config")"
+  include_path="$(shown "$GITCONFIG_GLOBAL")"
+  if hosts_config_included; then
+    echo "hosts.conf already included by your git config (skipped)"
+  elif [ "$DRY_RUN" = "1" ]; then
+    echo "include of hosts.conf WOULD BE appended to $include_target"
+  else
+    {
+      echo ""
+      echo "[include]"
+      echo "    path = $include_path"
+    } >> "$GIT_CONFIG_DIR/config"
+    echo "include of hosts.conf appended to $include_target"
+  fi
+  echo
+fi
 
 # ---------------------------------------------------------------------------
 # Global credential.helper - deliberately NOT per account: the helper only
@@ -808,30 +903,32 @@ fi
 
 # a) includeIf entries pointing at a config that no account owns any more.
 #    Kept when the target is a user file, since removing it would unwire its repos.
-while IFS= read -r ii_entry; do
-  ii_gitdir="${ii_entry%%$'\t'*}"
-  ii_path="${ii_entry#*$'\t'}"
-  is_known_config "$ii_path" && continue
-  if [ -e "$ii_path" ] && ! is_managed_config "$ii_path"; then
-    UNMANAGED=$((UNMANAGED + 1))
-    if [ "$LIST_UNMANAGED" = "1" ]; then
-      echo "includeIf entry for an unmanaged config, not touched: gitdir:$ii_gitdir -> $ii_path"
+for ii_file in "${INCLUDEIF_FILES[@]}"; do
+  while IFS= read -r ii_entry; do
+    ii_gitdir="${ii_entry%%$'\t'*}"
+    ii_path="${ii_entry#*$'\t'}"
+    is_known_config "$ii_path" && continue
+    if [ -e "$ii_path" ] && ! is_managed_config "$ii_path"; then
+      UNMANAGED=$((UNMANAGED + 1))
+      if [ "$LIST_UNMANAGED" = "1" ]; then
+        echo "includeIf entry for an unmanaged config, not touched: gitdir:$ii_gitdir -> $ii_path"
+      fi
+      continue
     fi
-    continue
-  fi
-  ORPHANS=$((ORPHANS + 1))
-  if [ "$PRUNE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
-    remove_includeif "$ii_gitdir" "$ii_path"
-    echo "Removed orphaned includeIf entry: gitdir:$ii_gitdir -> $ii_path"
-  elif [ "$PRUNE" = "1" ]; then
-    echo "Orphaned includeIf entry WOULD BE removed: gitdir:$ii_gitdir -> $ii_path"
-  else
-    echo "Orphaned includeIf entry in ~/.gitconfig: gitdir:$ii_gitdir -> $ii_path"
-  fi
-done < <(includeif_entries)
+    ORPHANS=$((ORPHANS + 1))
+    if [ "$PRUNE" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+      remove_includeif "$ii_gitdir" "$ii_path" "$ii_file"
+      echo "Removed orphaned includeIf entry: gitdir:$ii_gitdir -> $ii_path"
+    elif [ "$PRUNE" = "1" ]; then
+      echo "Orphaned includeIf entry WOULD BE removed: gitdir:$ii_gitdir -> $ii_path"
+    else
+      echo "Orphaned includeIf entry in $(shown "$ii_file"): gitdir:$ii_gitdir -> $ii_path"
+    fi
+  done < <(includeif_entries "$ii_file")
+done
 
-# b) ~/.gitconfig-<alias> files without a matching account
-for cfg in "$HOME"/.gitconfig-*; do
+# b) account config files without a matching account
+for cfg in "$HOME"/.gitconfig-* "$GIT_CONFIG_DIR"/host-*.conf; do
   [ -f "$cfg" ] || continue
   is_known_config "$cfg" && continue
   if ! is_managed_config "$cfg"; then
@@ -994,7 +1091,7 @@ echo
 if [ "$HTTPS_ACCOUNTS" -gt 0 ]; then
   step "HTTPS credentials:"
   echo "   - Only the username is stored (credential.https://<host>.username in"
-  echo "     ~/.gitconfig-<alias>). No password or token is written to any file"
+  echo "     $(shown "$(account_config_path '<alias>')")). No password or token is written to any file"
   echo "     by this script."
   echo "   - On the first push/fetch git asks for the password. Use a personal"
   echo "     access token there, not your account password:"

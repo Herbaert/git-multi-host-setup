@@ -23,6 +23,9 @@ banner() { printf '\n%s\n' "$1"; }
 new_sandbox() {
   SB="$(mktemp -d)"
   export HOME="$SB/home" GNUPGHOME="$SB/gnupg" PROJECT_BASE="$SB/home/projects" TMPDIR="$SB/tmp"
+  # The caller's values would point the script at the real git config.
+  unset XDG_CONFIG_HOME GIT_CONFIG_GLOBAL
+  CFG="$HOME/.config/git"
   mkdir -p "$HOME" "$GNUPGHOME" "$TMPDIR"
   chmod 700 "$GNUPGHOME"
   ACC="$SB/accounts.conf"
@@ -66,8 +69,19 @@ run() {
   echo $?
 }
 
-includeifs() {
-  git config --file "$HOME/.gitconfig" --get-regexp -z '^includeif' 2>/dev/null | tr '\0' '\n'
+includeifs() {   # includeifs [file], default ~/.gitconfig
+  git config --file "${1:-$HOME/.gitconfig}" --get-regexp -z '^includeif' 2>/dev/null | tr '\0' '\n'
+}
+
+# The e-mail git uses in a new repo inside an account's project folder.
+repo_email() {
+  git init -q "$PROJECT_BASE/$1/repo" && git -C "$PROJECT_BASE/$1/repo" config user.email
+}
+
+# Identity in ~/.config/git/config, which is what selects the XDG layout.
+xdg_identity() {
+  mkdir -p "$CFG"
+  printf '[user]\n\temail = default@x.io\n' > "$CFG/config"
 }
 
 count() { grep -c -- "$1" || true; }
