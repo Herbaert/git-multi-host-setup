@@ -48,6 +48,23 @@ t_rename() { new_sandbox
   printf 'a|github.com|git|new|A|a@x.io\n' > "$ACC"; run >/dev/null
   includeifs | grep -o 'projects/[^/]*/' | tr '\n' ' '; }
 
+t_symlinked_base() { new_sandbox
+  mkdir -p "$SB/real"; ln -s "$SB/real" "$SB/link"
+  export PROJECT_BASE="$SB/link"
+  printf 'a|github.com|git|f|A|a@x.io\n' > "$ACC"; run >/dev/null
+  git init -q "$SB/link/f/repo"
+  git -C "$SB/link/f/repo" config user.email; }
+
+# Entries from before paths were resolved.
+t_symlink_upgrade() { new_sandbox
+  mkdir -p "$SB/real"; ln -s "$SB/real" "$SB/link"
+  export PROJECT_BASE="$SB/link"
+  printf 'a|github.com|git|f|A|a@x.io\n' > "$ACC"; run >/dev/null
+  sed "s|$(cd "$SB/real" && pwd -P)|$SB/link|" "$HOME/.gitconfig" > "$SB/g" && mv "$SB/g" "$HOME/.gitconfig"
+  run >/dev/null
+  git init -q "$SB/link/f/repo"
+  echo "mappings=$(includeifs | count '\.gitconfig-a'),hint=$(count 'still exists' < "$SB/out.txt"),email=$(git -C "$SB/link/f/repo" config user.email)"; }
+
 # --- PRUNE -------------------------------------------------------------------
 t_prune_own() { new_sandbox
   printf 'a|github.com|git|fa|A|a@x.io\nb|gitlab.com|git|fb|B|b@x.io\n' > "$ACC"; run >/dev/null
@@ -184,6 +201,11 @@ t_passphrase_no_tty() { new_sandbox
   local rc; rc="$(run GPG_PASSPHRASE=1)"
   echo "rc=$rc,files=$(find "$HOME" -mindepth 1 | wc -l | tr -d ' ')"; }
 
+t_old_bash() { new_sandbox
+  printf 'a|github.com|git|f|A|a@x.io\n' > "$ACC"
+  /bin/bash "$SCRIPT" "$ACC" >"$SB/out.txt" 2>"$SB/err.txt" </dev/null
+  echo "rc=$?,message=$(count 'bash 5 or newer' < "$SB/err.txt"),files=$(find "$HOME" -mindepth 1 | wc -l | tr -d ' ')"; }
+
 t_tmp_cleanup() { new_sandbox
   mkdir -p "$HOME/.gitconfig-a"   # writing the config fails after mktemp
   local tdir mail
@@ -203,6 +225,8 @@ check "all empty fields named"              "alias=1,email=1" "$(t_empty_fields)
 banner "includeIf"
 check "folder handover keeps both mappings" "mappings=2,hint=0"      "$(t_handover)"
 check "spaces in PROJECT_BASE"              "sections=1,orphans=0"   "$(t_spaces)"
+check "symlinked project base matches"     "a@x.io"                 "$(t_symlinked_base)"
+check "unresolved old entry moves silently" "mappings=1,hint=0,email=a@x.io" "$(t_symlink_upgrade)"
 check "rename moves the entry"              "projects/new/ "         "$(t_rename)"
 
 banner "PRUNE"
@@ -238,5 +262,11 @@ check "expired key extended in place"       "keys=1,validity=u,same_fpr=yes,hint
 check "protected expired key: hint, no new key" "keys=1,validity=e,hint=1" "$(t_gpg_expired_protected)"
 check "GPG_PASSPHRASE=1 without terminal aborts first" "rc=1,files=0" "$(t_passphrase_no_tty)"
 check "temp files removed on abort"         "0"                       "$(t_tmp_cleanup)"
+
+# Only where an old bash exists, i.e. /bin/bash on macOS.
+if [ "$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}')" -lt 5 ]; then
+  banner "Requirements"
+  check "bash < 5 aborts before writing"    "rc=1,message=1,files=0"  "$(t_old_bash)"
+fi
 
 summary

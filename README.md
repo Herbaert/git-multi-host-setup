@@ -25,7 +25,7 @@ For every account defined in the accounts file, it automatically:
 
 Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested.
 
-- `bash`
+- bash ≥ 5. macOS ships bash 3.2, install a current one with `brew install bash`.
 - Git ≥ 2.13 (for `includeIf`)
 - `gpg` (package `gnupg`)
 - `ssh-keygen` (package `openssh-client`) – only for SSH accounts

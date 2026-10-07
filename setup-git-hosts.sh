@@ -2,6 +2,8 @@
 #
 # setup-git-hosts.sh
 #
+# Requires bash 5 or newer. macOS ships bash 3.2: brew install bash
+#
 # Automatically creates:
 #   - an SSH key per configured account
 #   - a GPG key per configured account (without passphrase, see warning below)
@@ -87,6 +89,12 @@
 
 set -euo pipefail
 
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  echo "ERROR: bash 5 or newer is required, this is bash $BASH_VERSION." >&2
+  echo "  On macOS: brew install bash, then run the script again." >&2
+  exit 1
+fi
+
 # Rendered configs hold name, e-mail and fingerprint, so temp files must not
 # outlive an aborted run.
 TMP_FILES=()
@@ -149,6 +157,16 @@ apply() {
     return 0
   fi
   "$@"
+}
+
+# git matches gitdir against the resolved path, so symlinks must be resolved here.
+real_path() {
+  local dir="$1" rest=""
+  while [ ! -d "$dir" ]; do
+    rest="/${dir##*/}$rest"
+    dir="$(dirname "$dir")"
+  done
+  printf '%s%s' "$(cd "$dir" && pwd -P)" "$rest"
 }
 
 # '-' becomes '_', so the accounts check rejects aliases that collide here.
@@ -567,7 +585,7 @@ for entry in "${ACCOUNTS[@]}"; do
   parse_entry "$entry"
 
   key_path="$(ssh_key_path "$alias")"
-  project_path="$PROJECT_BASE/$folder"
+  project_path="$(real_path "$PROJECT_BASE/$folder")"
   gitconfig_path="$(account_config_path "$alias")"
 
   echo "--- Account: $alias ---"
@@ -790,7 +808,7 @@ EOF
       remove_includeif "$g" "$gitconfig_path"
       echo "  stale includeIf entry removed: gitdir:$g"
     fi
-    if [ -d "${g%/}" ]; then
+    if [ -d "${g%/}" ] && ! [ "${g%/}" -ef "$project_path" ]; then
       CHANGE_HINTS+=("$alias: old project directory ${g%/} still exists - move its repos to $project_path or delete it")
     fi
   done
