@@ -2,6 +2,8 @@
 #
 # setup-git-hosts.sh
 #
+# Requires bash 5 or newer. macOS ships bash 3.2: brew install bash
+#
 # Automatically creates:
 #   - an SSH key per configured account
 #   - a GPG key per configured account (without passphrase, see warning below)
@@ -81,6 +83,12 @@
 #     (e.g. GitHub/GitLab Settings -> SSH and GPG keys)
 
 set -euo pipefail
+
+if [ "${BASH_VERSINFO[0]}" -lt 5 ]; then
+  echo "ERROR: bash 5 or newer is required, this is bash $BASH_VERSION." >&2
+  echo "  On macOS: brew install bash, then run the script again." >&2
+  exit 1
+fi
 
 # Rendered configs hold name, e-mail and fingerprint, so temp files must not
 # outlive an aborted run.
