@@ -137,6 +137,11 @@ t_passphrase_no_tty() { new_sandbox
   local rc; rc="$(run GPG_PASSPHRASE=1)"
   echo "rc=$rc,files=$(find "$HOME" -mindepth 1 | wc -l | tr -d ' ')"; }
 
+t_old_bash() { new_sandbox
+  printf 'a|github.com|git|f|A|a@x.io\n' > "$ACC"
+  /bin/bash "$SCRIPT" "$ACC" >"$SB/out.txt" 2>"$SB/err.txt" </dev/null
+  echo "rc=$?,message=$(count 'bash 5 or newer' < "$SB/err.txt"),files=$(find "$HOME" -mindepth 1 | wc -l | tr -d ' ')"; }
+
 t_tmp_cleanup() { new_sandbox
   mkdir -p "$HOME/.gitconfig-a"   # writing the config fails after mktemp
   local tdir mail
@@ -179,5 +184,11 @@ check "expired key extended in place"       "keys=1,validity=u,same_fpr=yes,hint
 check "protected expired key: hint, no new key" "keys=1,validity=e,hint=1" "$(t_gpg_expired_protected)"
 check "GPG_PASSPHRASE=1 without terminal aborts first" "rc=1,files=0" "$(t_passphrase_no_tty)"
 check "temp files removed on abort"         "0"                       "$(t_tmp_cleanup)"
+
+# Only where an old bash exists, i.e. /bin/bash on macOS.
+if [ "$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}')" -lt 5 ]; then
+  banner "Requirements"
+  check "bash < 5 aborts before writing"    "rc=1,message=1,files=0"  "$(t_old_bash)"
+fi
 
 summary
