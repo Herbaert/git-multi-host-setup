@@ -48,6 +48,23 @@ t_rename() { new_sandbox
   printf 'a|github.com|git|new|A|a@x.io\n' > "$ACC"; run >/dev/null
   includeifs | grep -o 'projects/[^/]*/' | tr '\n' ' '; }
 
+t_symlinked_base() { new_sandbox
+  mkdir -p "$SB/real"; ln -s "$SB/real" "$SB/link"
+  export PROJECT_BASE="$SB/link"
+  printf 'a|github.com|git|f|A|a@x.io\n' > "$ACC"; run >/dev/null
+  git init -q "$SB/link/f/repo"
+  git -C "$SB/link/f/repo" config user.email; }
+
+# Entries from before paths were resolved.
+t_symlink_upgrade() { new_sandbox
+  mkdir -p "$SB/real"; ln -s "$SB/real" "$SB/link"
+  export PROJECT_BASE="$SB/link"
+  printf 'a|github.com|git|f|A|a@x.io\n' > "$ACC"; run >/dev/null
+  sed "s|$(cd "$SB/real" && pwd -P)|$SB/link|" "$HOME/.gitconfig" > "$SB/g" && mv "$SB/g" "$HOME/.gitconfig"
+  run >/dev/null
+  git init -q "$SB/link/f/repo"
+  echo "mappings=$(includeifs | count '\.gitconfig-a'),hint=$(count 'still exists' < "$SB/out.txt"),email=$(git -C "$SB/link/f/repo" config user.email)"; }
+
 # --- PRUNE -------------------------------------------------------------------
 t_prune_own() { new_sandbox
   printf 'a|github.com|git|fa|A|a@x.io\nb|gitlab.com|git|fb|B|b@x.io\n' > "$ACC"; run >/dev/null
@@ -161,6 +178,8 @@ check "all empty fields named"              "alias=1,email=1" "$(t_empty_fields)
 banner "includeIf"
 check "folder handover keeps both mappings" "mappings=2,hint=0"      "$(t_handover)"
 check "spaces in PROJECT_BASE"              "sections=1,orphans=0"   "$(t_spaces)"
+check "symlinked project base matches"     "a@x.io"                 "$(t_symlinked_base)"
+check "unresolved old entry moves silently" "mappings=1,hint=0,email=a@x.io" "$(t_symlink_upgrade)"
 check "rename moves the entry"              "projects/new/ "         "$(t_rename)"
 
 banner "PRUNE"
