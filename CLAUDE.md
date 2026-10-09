@@ -1,13 +1,12 @@
+## Working on this repo
+
+- Requires bash 5. Before every commit, `shellcheck -S style -x setup-git-hosts.sh tests/*.sh` and `bash tests/run.sh` must both pass.
+- Run the script only inside a sandbox HOME, like `new_sandbox` in `tests/lib.sh` does.
+- Commit messages are a single line.
+- Comments state the why in one sentence. Before handing over, read every added `#` line in the diff.
+
 ## Agent skills
 
-### Issue tracker
-
-Issues and specs live in GitHub Issues of Herbaert/git-multi-host-setup, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-The five default labels: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+- Before creating, reading or labelling an issue: `docs/agents/issue-tracker.md` (GitHub via `gh`).
+- Before applying a triage label: `docs/agents/triage-labels.md`.
+- Before exploring the code: `docs/agents/domain.md` (single context; `CONTEXT.md` and `docs/adr/` are created when needed).
