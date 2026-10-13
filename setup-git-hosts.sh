@@ -209,6 +209,21 @@ parse_entry() {
   https_user="$(trim "${https_user:-}")"
   ssh_key_type="$(trim "${ssh_key_type:-}")"
   ssh_key_type="${ssh_key_type:-ed25519}"
+  # Azure DevOps serves SSH and HTTPS on different hosts and repo paths.
+  case "$hostname" in
+    ssh.dev.azure.com|dev.azure.com)
+      ssh_host="ssh.dev.azure.com"
+      https_host="dev.azure.com"
+      ssh_repo="v3/org/project/repo"
+      https_repo="org/project/_git/repo"
+      ;;
+    *)
+      ssh_host="$hostname"
+      https_host="$hostname"
+      ssh_repo="org/repo.git"
+      https_repo="org/repo.git"
+      ;;
+  esac
 }
 
 # gpg_fpr_for_email <email> [usable|expired]
@@ -252,7 +267,9 @@ extend_key() {
 #
 # alias          -> internal identifier for the key filename & git config,
 #                   e.g. github-work (does NOT appear in the clone URL)
-# hostname       -> real hostname, e.g. github.com (used when cloning)
+# hostname       -> real hostname, e.g. github.com (used when cloning).
+#                   For Azure DevOps either ssh.dev.azure.com or dev.azure.com,
+#                   SSH and HTTPS then each get the right one.
 # ssh_user       -> usually "git"; leave EMPTY to disable SSH for this
 #                   account (HTTPS only - no key is generated, no
 #                   core.sshCommand is written)
@@ -733,7 +750,7 @@ EOF
   #     keeps it afterwards.
   if [ -n "$https_user" ]; then
     cat >> "$desired_cfg" <<EOF
-[credential "https://$hostname"]
+[credential "https://$https_host"]
     username = $https_user
 EOF
   fi
@@ -1081,7 +1098,7 @@ if [ "$SSH_ACCOUNTS" -gt 0 ]; then
       continue
     fi
     key_path="$(ssh_key_path "$alias" "$ssh_key_type")"
-    echo "   ssh -i $key_path -T $ssh_user@$hostname"
+    echo "   ssh -i $key_path -T $ssh_user@$ssh_host"
   done
   echo
 fi
@@ -1097,10 +1114,10 @@ for entry in "${ACCOUNTS[@]}"; do
   echo "   - $alias -> $PROJECT_BASE/$folder/repo"
   if [ -n "$ssh_user" ]; then
     echo "       SSH:    git -c core.sshCommand=\"ssh -i $key_path -o IdentitiesOnly=yes\" \\"
-    echo "                   clone $ssh_user@$hostname:org/repo.git $PROJECT_BASE/$folder/repo"
+    echo "                   clone $ssh_user@$ssh_host:$ssh_repo $PROJECT_BASE/$folder/repo"
   fi
   if [ -n "$https_user" ]; then
-    echo "       HTTPS:  git clone https://$https_user@$hostname/org/repo.git $PROJECT_BASE/$folder/repo"
+    echo "       HTTPS:  git clone https://$https_user@$https_host/$https_repo $PROJECT_BASE/$folder/repo"
   else
     echo "       HTTPS:  not configured (add a 7th field 'https_user' in $(basename "$ACCOUNTS_FILE"))"
   fi
@@ -1118,6 +1135,7 @@ if [ "$HTTPS_ACCOUNTS" -gt 0 ]; then
   echo "                Contents: read/write)"
   echo "       GitLab: Settings -> Access tokens (scope 'write_repository')"
   echo "       Gitea:  Settings -> Applications -> Generate token"
+  echo "       Azure DevOps: User settings -> Personal access tokens (Code: Read & write)"
   if [ -n "$CRED_HELPER_ACTIVE" ]; then
     echo "   - The token is then kept by the credential helper '$CRED_HELPER_ACTIVE',"
     echo "     so you only type it once per account."

@@ -47,7 +47,7 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
    | Field | Meaning |
    |---|---|
    | `alias` | internal identifier for the key filename & git config (does not appear in the clone URL) |
-   | `hostname` | real hostname, e.g. `github.com` |
+   | `hostname` | real hostname, e.g. `github.com`. For Azure DevOps either `ssh.dev.azure.com` or `dev.azure.com` – SSH then uses the former, HTTPS the latter |
    | `ssh_user` | usually `git`; leave **empty** to disable SSH for this account (HTTPS only) |
    | `project_folder` | relative path under `~/projects`, e.g. `github-work` |
    | `git_name` | name used in commits made in this directory |
@@ -127,6 +127,7 @@ The project directory decides which identity is used, not the protocol. Each acc
 | `alias\|github.com\|git\|folder\|Name\|mail` | SSH only – no HTTPS username |
 | `alias\|github.com\|\|folder\|Name\|mail\|handle` | **HTTPS only** – `ssh_user` empty, so no SSH key is generated and no `core.sshCommand` is written |
 | `alias\|ssh.dev.azure.com\|git\|folder\|Name\|mail\|\|rsa` | SSH only, with an **RSA** key instead of ed25519 |
+| `alias\|ssh.dev.azure.com\|git\|folder\|Name\|mail\|login\|rsa` | Azure DevOps with SSH (RSA) **and** HTTPS – the username is stored for `https://dev.azure.com` |
 
 ### SSH
 
@@ -162,6 +163,7 @@ Use a **personal access token**, not your account password:
 | GitHub | Settings → Developer settings → Personal access tokens | classic: `repo`, fine-grained: Contents read/write |
 | GitLab | Settings → Access tokens | `write_repository` |
 | Gitea | Settings → Applications → Generate token | repo write |
+| Azure DevOps | User settings → Personal access tokens | Code: Read & write |
 
 The helper is picked automatically: `osxkeychain` on macOS, `libsecret` or `manager` on Linux/Windows if present, otherwise `cache --timeout=86400` (in-memory only). It is written to the **global** config once, because the helper only decides *where* credentials are kept – the identity comes from the per-directory username. Override it with `CREDENTIAL_HELPER`, or keep your own with `SETUP_CREDENTIAL_HELPER=0`.
 

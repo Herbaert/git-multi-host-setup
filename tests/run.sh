@@ -175,6 +175,10 @@ t_rsa_key() { new_sandbox
   printf 'az|ssh.dev.azure.com|git|fa|A|a@x.io||rsa\n' > "$ACC"; run >/dev/null
   echo "type=$(ssh-keygen -l -f "$HOME/.ssh/id_rsa_az" | awk '{print $1 "/" $NF}'),sshCommand=$(git config --file "$HOME/.gitconfig-az" --get core.sshCommand | count 'id_rsa_az ')"; }
 
+t_azure_hosts() { new_sandbox
+  printf 'az|ssh.dev.azure.com|git|fa|A|a@x.io|me\n' > "$ACC"; run >/dev/null
+  echo "username=$(git config --file "$HOME/.gitconfig-az" --get 'credential.https://dev.azure.com.username'),ssh=$(count 'git@ssh.dev.azure.com:v3/org/project/repo ' < "$SB/out.txt"),https=$(count 'https://me@dev.azure.com/org/project/_git/repo ' < "$SB/out.txt")"; }
+
 # --- GPG -----------------------------------------------------------------------
 t_gpg_empty_fpr() { new_sandbox
   export GPG_STUB_FAIL_SILENT=1
@@ -262,6 +266,7 @@ check "dry run writes nothing, previews setup" \
       "files=0,fresh_would_run=3,bare_export=0,setup_would_run=0"    "$(t_dry_run)"
 check "second run changes nothing"          "identical=yes,unchanged=2" "$(t_idempotent)"
 check "rsa key for SSH-only account"       "type=4096/(RSA),sshCommand=1" "$(t_rsa_key)"
+check "Azure DevOps: SSH and HTTPS hosts split" "username=me,ssh=1,https=1" "$(t_azure_hosts)"
 check "HTTPS-only stays SSH-free"           "sshCommand=none,key=no"  "$(t_https_only)"
 
 banner "GPG"
