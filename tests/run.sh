@@ -28,6 +28,9 @@ t_folder_spelling() { new_sandbox
 t_key_collision() { new_sandbox
   printf 'acme-dev|github.com|git|f1|A|a@x.io\nacme_dev|gitlab.com|git|f2|B|b@x.io\n' > "$ACC"; run; }
 
+t_bad_key_type() { new_sandbox
+  printf 'a|github.com|git|f|A|a@x.io||dsa\n' > "$ACC"; run; }
+
 t_empty_fields() { new_sandbox
   printf '|github.com|git|f|N||h\n' > "$ACC"; run >/dev/null
   echo "alias=$(count 'alias' < "$SB/err.txt"),email=$(count 'git_email' < "$SB/err.txt")"; }
@@ -168,6 +171,10 @@ t_https_only() { new_sandbox
   printf 'h|github.com||fh|H|h@x.io|handle\n' > "$ACC"; run >/dev/null
   echo "sshCommand=$(git config --file "$HOME/.gitconfig-h" --get core.sshCommand || echo none),key=$(exists "$HOME/.ssh/id_ed25519_h")"; }
 
+t_rsa_key() { new_sandbox
+  printf 'az|ssh.dev.azure.com|git|fa|A|a@x.io||rsa\n' > "$ACC"; run >/dev/null
+  echo "type=$(ssh-keygen -l -f "$HOME/.ssh/id_rsa_az" | awk '{print $1 "/" $NF}'),sshCommand=$(git config --file "$HOME/.gitconfig-az" --get core.sshCommand | count 'id_rsa_az ')"; }
+
 # --- GPG -----------------------------------------------------------------------
 t_gpg_empty_fpr() { new_sandbox
   export GPG_STUB_FAIL_SILENT=1
@@ -220,6 +227,7 @@ check "duplicate alias rejected"            "1"           "$(t_dup_alias)"
 check "folder/ and folder are one folder"   "1"           "$(t_dup_folder)"
 check "no // in gitdir"                     "0"           "$(t_folder_spelling)"
 check "acme-dev/acme_dev rejected"          "1"           "$(t_key_collision)"
+check "unknown ssh_key_type rejected"       "1"           "$(t_bad_key_type)"
 check "all empty fields named"              "alias=1,email=1" "$(t_empty_fields)"
 
 banner "includeIf"
@@ -253,6 +261,7 @@ banner "DRY_RUN and idempotency"
 check "dry run writes nothing, previews setup" \
       "files=0,fresh_would_run=3,bare_export=0,setup_would_run=0"    "$(t_dry_run)"
 check "second run changes nothing"          "identical=yes,unchanged=2" "$(t_idempotent)"
+check "rsa key for SSH-only account"       "type=4096/(RSA),sshCommand=1" "$(t_rsa_key)"
 check "HTTPS-only stays SSH-free"           "sshCommand=none,key=no"  "$(t_https_only)"
 
 banner "GPG"

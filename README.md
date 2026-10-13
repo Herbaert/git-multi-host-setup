@@ -6,7 +6,7 @@ Automated setup for multiple git accounts across multiple hosts (GitHub, GitLab,
 
 For every account defined in the accounts file, it automatically:
 
-- generates a dedicated **SSH key** (ed25519) – unless the account is HTTPS-only
+- generates a dedicated **SSH key** (ed25519, or RSA per account, e.g. for Azure DevOps) – unless the account is HTTPS-only
 - generates or reuses a dedicated **GPG key** (ed25519/cv25519, no passphrase, valid for 2 years)
 - creates a matching project directory under `~/projects/<folder>`
 - writes a dedicated `~/.gitconfig-<alias>` containing:
@@ -41,7 +41,7 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
    One line per account, format:
 
    ```
-   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user]
+   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user[|ssh_key_type]]
    ```
 
    | Field | Meaning |
@@ -53,6 +53,7 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
    | `git_name` | name used in commits made in this directory |
    | `git_email` | e-mail used in commits made in this directory |
    | `https_user` | *optional*: your login name on that host, used for HTTPS remotes. Omit the field for SSH-only accounts. |
+   | `ssh_key_type` | *optional*: `ed25519` (default) or `rsa` (4096 bit, key file `~/.ssh/id_rsa_<alias>`). Use `rsa` for hosts that do not accept ed25519, e.g. Azure DevOps. For an SSH-only account leave `https_user` empty: `...\|mail\|\|rsa` |
 
    Every account needs at least one of `ssh_user` / `https_user`; the script
    aborts if both are missing.
@@ -60,7 +61,8 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
    Blank lines and lines starting with `#` are ignored. Whitespace around fields
    is stripped, and `work`, `work/` and `./work` name the same folder.
 
-   The script aborts on an empty required field, on an `alias` with characters
+   The script aborts on an empty required field, on an `ssh_key_type` other than
+   `ed25519` or `rsa`, on an `alias` with characters
    other than letters, digits, `.`, `_`, `-`, and on two accounts sharing an
    `alias`, a `project_folder` or an SSH key file (`acme-dev` and `acme_dev`
    both map to `~/.ssh/id_ed25519_acme_dev`).
@@ -124,6 +126,7 @@ The project directory decides which identity is used, not the protocol. Each acc
 | `alias\|github.com\|git\|folder\|Name\|mail\|handle` | SSH **and** HTTPS |
 | `alias\|github.com\|git\|folder\|Name\|mail` | SSH only – no HTTPS username |
 | `alias\|github.com\|\|folder\|Name\|mail\|handle` | **HTTPS only** – `ssh_user` empty, so no SSH key is generated and no `core.sshCommand` is written |
+| `alias\|ssh.dev.azure.com\|git\|folder\|Name\|mail\|\|rsa` | SSH only, with an **RSA** key instead of ed25519 |
 
 ### SSH
 
@@ -190,7 +193,7 @@ git remote set-url origin git@github.com:org/repo.git                   # HTTPS 
 
 The script is safe to run repeatedly and doubles as an **update mechanism**: edit `accounts.conf` and run it again, and it reconciles the files on disk with what the accounts file now says.
 
-- **SSH/GPG keys, directories** – created if missing, left alone otherwise (a changed `git_email` does **not** regenerate the GPG key; delete the old one yourself if you really want a new one). A GPG key must match the e-mail exactly. An expired key is extended by 2 years and keeps its fingerprint, so you only re-upload the public key. If that fails, the run prints the command instead of creating a new key.
+- **SSH/GPG keys, directories** – created if missing, left alone otherwise (a changed `git_email` does **not** regenerate the GPG key; delete the old one yourself if you really want a new one). Switching `ssh_key_type` creates a new key file and points `core.sshCommand` at it; the old key stays. A GPG key must match the e-mail exactly. An expired key is extended by 2 years and keeps its fingerprint, so you only re-upload the public key. If that fails, the run prints the command instead of creating a new key.
 - **`~/.gitconfig-<alias>`** – compared setting by setting against what the account line now produces. Every difference is printed before it's applied, e.g.:
   ```
   ~ user.name: Old Name -> New Name

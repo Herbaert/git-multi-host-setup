@@ -1,7 +1,7 @@
 # accounts.conf
 #
 # One line per account, format:
-#   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user]
+#   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user[|ssh_key_type]]
 #
 # alias          -> internal identifier for the key filename & git config,
 #                    e.g. github-work (does NOT appear in the clone URL)
@@ -16,6 +16,8 @@
 #                    config - the password/token is asked by git on the first
 #                    push/fetch and then cached by the credential helper.
 #                    Omit the field (or leave it empty) for SSH-only accounts.
+# ssh_key_type   -> OPTIONAL 8th field: ed25519 (default) or rsa. Use rsa for
+#                    hosts that do not accept ed25519 keys, e.g. Azure DevOps.
 #
 # Each account needs at least one of ssh_user / https_user.
 #
@@ -33,3 +35,6 @@ gitlab-work|gitlab.com||gitlab-work|Your Name (Company)|work@company.example|you
 
 # SSH only (6 fields, HTTPS username left out)
 company-gitea|git.company.example|git|company-gitea|Your Name (Company)|work@company.example
+
+# SSH only with an RSA key (8th field; the empty 7th field means no HTTPS)
+azure-work|ssh.dev.azure.com|git|azure-work|Your Name (Company)|work@company.example||rsa
