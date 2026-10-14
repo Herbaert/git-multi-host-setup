@@ -5,7 +5,8 @@
 # Requires bash 5 or newer. macOS ships bash 3.2: brew install bash
 #
 # Automatically creates:
-#   - an SSH key per configured account
+#   - an SSH key per configured account (ed25519, or RSA where a host like
+#     Azure DevOps needs it)
 #   - a GPG key per configured account (without passphrase, see warning below)
 #   - directory-specific ~/.gitconfig-<alias> files with core.sshCommand,
 #     GPG signing (user.signingkey, commit.gpgsign, tag.gpgsign) and - if an
@@ -169,9 +170,10 @@ real_path() {
   printf '%s%s' "$(cd "$dir" && pwd -P)" "$rest"
 }
 
+# ssh_key_path <alias> <key type>
 # '-' becomes '_', so the accounts check rejects aliases that collide here.
 ssh_key_path() {
-  printf '%s' "$SSH_DIR/id_ed25519_${1//-/_}"
+  printf '%s' "$SSH_DIR/id_${2}_${1//-/_}"
 }
 
 trim() {
@@ -193,7 +195,7 @@ contains() {
 # Sets globals on purpose. Each field is trimmed because " github.com" would
 # only fail at push time.
 parse_entry() {
-  IFS='|' read -r alias hostname ssh_user folder name email https_user <<< "$1"
+  IFS='|' read -r alias hostname ssh_user folder name email https_user ssh_key_type <<< "$1"
   alias="$(trim "$alias")"
   hostname="$(trim "$hostname")"
   ssh_user="$(trim "$ssh_user")"
@@ -205,6 +207,23 @@ parse_entry() {
   name="$(trim "$name")"
   email="$(trim "$email")"
   https_user="$(trim "${https_user:-}")"
+  ssh_key_type="$(trim "${ssh_key_type:-}")"
+  ssh_key_type="${ssh_key_type:-ed25519}"
+  # Azure DevOps serves SSH and HTTPS on different hosts and repo paths.
+  case "$hostname" in
+    ssh.dev.azure.com|dev.azure.com)
+      ssh_host="ssh.dev.azure.com"
+      https_host="dev.azure.com"
+      ssh_repo="v3/org/project/repo"
+      https_repo="org/project/_git/repo"
+      ;;
+    *)
+      ssh_host="$hostname"
+      https_host="$hostname"
+      ssh_repo="org/repo.git"
+      https_repo="org/repo.git"
+      ;;
+  esac
 }
 
 # gpg_fpr_for_email <email> [usable|expired]
@@ -244,11 +263,13 @@ extend_key() {
 
 # ---------------------------------------------------------------------------
 # Format of each line in the accounts file:
-#   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user]
+#   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user[|ssh_key_type]]
 #
 # alias          -> internal identifier for the key filename & git config,
 #                   e.g. github-work (does NOT appear in the clone URL)
-# hostname       -> real hostname, e.g. github.com (used when cloning)
+# hostname       -> real hostname, e.g. github.com (used when cloning).
+#                   For Azure DevOps either ssh.dev.azure.com or dev.azure.com,
+#                   SSH and HTTPS then each get the right one.
 # ssh_user       -> usually "git"; leave EMPTY to disable SSH for this
 #                   account (HTTPS only - no key is generated, no
 #                   core.sshCommand is written)
@@ -261,6 +282,9 @@ extend_key() {
 #                   is asked by git on the first push/fetch and then cached
 #                   by the credential helper. Leave the field out (or empty)
 #                   if you only ever use SSH.
+# ssh_key_type   -> OPTIONAL: ed25519 (default) or rsa. Use rsa for hosts that
+#                   do not accept ed25519 keys, e.g. Azure DevOps. For an
+#                   SSH-only account leave https_user empty: ...|email||rsa
 #
 # Each account needs at least one of ssh_user / https_user.
 #
@@ -281,9 +305,9 @@ while IFS= read -r line || [ -n "$line" ]; do
     \#*) continue ;;
   esac
   field_count="$(awk -F'|' '{print NF}' <<< "$trimmed")"
-  if [ "$field_count" -lt 6 ] || [ "$field_count" -gt 7 ]; then
+  if [ "$field_count" -lt 6 ] || [ "$field_count" -gt 8 ]; then
     echo "ERROR: invalid line $lineno in $ACCOUNTS_FILE" >&2
-    echo "  expected 6 or 7 '|'-separated fields, got $field_count:" >&2
+    echo "  expected 6 to 8 '|'-separated fields, got $field_count:" >&2
     echo "  $trimmed" >&2
     exit 1
   fi
@@ -318,7 +342,15 @@ while IFS= read -r line || [ -n "$line" ]; do
     echo "  A project directory can only map to one account - give '$alias' its own folder." >&2
     exit 1
   fi
-  key_file="$(ssh_key_path "$alias")"
+  case "$ssh_key_type" in
+    ed25519|rsa) ;;
+    *)
+      echo "ERROR: line $lineno in $ACCOUNTS_FILE has an unknown ssh_key_type '$ssh_key_type'." >&2
+      echo "  Allowed are 'ed25519' (default) and 'rsa'." >&2
+      exit 1
+      ;;
+  esac
+  key_file="$(ssh_key_path "$alias" "$ssh_key_type")"
   for i in ${SEEN_KEYS[@]+"${!SEEN_KEYS[@]}"}; do
     if [ "${SEEN_KEYS[i]}" = "$key_file" ]; then
       echo "ERROR: line $lineno in $ACCOUNTS_FILE: alias '$alias' and alias '${SEEN_ALIASES[i]}'" >&2
@@ -584,7 +616,7 @@ ACCOUNT_FPRS=()   # GPG fingerprint per account, same order as ACCOUNTS
 for entry in "${ACCOUNTS[@]}"; do
   parse_entry "$entry"
 
-  key_path="$(ssh_key_path "$alias")"
+  key_path="$(ssh_key_path "$alias" "$ssh_key_type")"
   project_path="$(real_path "$PROJECT_BASE/$folder")"
   gitconfig_path="$(account_config_path "$alias")"
 
@@ -599,7 +631,10 @@ for entry in "${ACCOUNTS[@]}"; do
   elif [ "$DRY_RUN" = "1" ]; then
     echo "  SSH key WOULD BE created: $key_path"
   else
-    ssh-keygen -t ed25519 -C "$email" -f "$key_path" -N ""
+    keygen_opts=(-t "$ssh_key_type")
+    # Older ssh-keygen versions default to 2048-bit RSA keys.
+    [ "$ssh_key_type" = "rsa" ] && keygen_opts+=(-b 4096)
+    ssh-keygen "${keygen_opts[@]}" -C "$email" -f "$key_path" -N ""
     echo "  SSH key created: $key_path"
   fi
 
@@ -715,7 +750,7 @@ EOF
   #     keeps it afterwards.
   if [ -n "$https_user" ]; then
     cat >> "$desired_cfg" <<EOF
-[credential "https://$hostname"]
+[credential "https://$https_host"]
     username = $https_user
 EOF
   fi
@@ -1016,7 +1051,7 @@ if [ "$SSH_ACCOUNTS" -gt 0 ]; then
     if [ -z "$ssh_user" ]; then
       continue
     fi
-    key_path="$(ssh_key_path "$alias").pub"
+    key_path="$(ssh_key_path "$alias" "$ssh_key_type").pub"
     echo "   - $alias ($hostname): $key_path"
     echo "       show:  cat $key_path"
     if [ -n "$CLIP_CMD" ]; then
@@ -1062,8 +1097,8 @@ if [ "$SSH_ACCOUNTS" -gt 0 ]; then
     if [ -z "$ssh_user" ]; then
       continue
     fi
-    key_path="$(ssh_key_path "$alias")"
-    echo "   ssh -i $key_path -T $ssh_user@$hostname"
+    key_path="$(ssh_key_path "$alias" "$ssh_key_type")"
+    echo "   ssh -i $key_path -T $ssh_user@$ssh_host"
   done
   echo
 fi
@@ -1075,14 +1110,14 @@ echo "   after the clone (fetch, push, commit) picks it up automatically."
 echo
 for entry in "${ACCOUNTS[@]}"; do
   parse_entry "$entry"
-  key_path="$(ssh_key_path "$alias")"
+  key_path="$(ssh_key_path "$alias" "$ssh_key_type")"
   echo "   - $alias -> $PROJECT_BASE/$folder/repo"
   if [ -n "$ssh_user" ]; then
     echo "       SSH:    git -c core.sshCommand=\"ssh -i $key_path -o IdentitiesOnly=yes\" \\"
-    echo "                   clone $ssh_user@$hostname:org/repo.git $PROJECT_BASE/$folder/repo"
+    echo "                   clone $ssh_user@$ssh_host:$ssh_repo $PROJECT_BASE/$folder/repo"
   fi
   if [ -n "$https_user" ]; then
-    echo "       HTTPS:  git clone https://$https_user@$hostname/org/repo.git $PROJECT_BASE/$folder/repo"
+    echo "       HTTPS:  git clone https://$https_user@$https_host/$https_repo $PROJECT_BASE/$folder/repo"
   else
     echo "       HTTPS:  not configured (add a 7th field 'https_user' in $(basename "$ACCOUNTS_FILE"))"
   fi
@@ -1100,6 +1135,7 @@ if [ "$HTTPS_ACCOUNTS" -gt 0 ]; then
   echo "                Contents: read/write)"
   echo "       GitLab: Settings -> Access tokens (scope 'write_repository')"
   echo "       Gitea:  Settings -> Applications -> Generate token"
+  echo "       Azure DevOps: User settings -> Personal access tokens (Code: Read & write)"
   if [ -n "$CRED_HELPER_ACTIVE" ]; then
     echo "   - The token is then kept by the credential helper '$CRED_HELPER_ACTIVE',"
     echo "     so you only type it once per account."
