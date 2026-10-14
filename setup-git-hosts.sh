@@ -11,6 +11,7 @@
 #   - directory-specific ~/.gitconfig-<alias> files with core.sshCommand,
 #     GPG signing (user.signingkey, commit.gpgsign, tag.gpgsign) and - if an
 #     HTTPS username is configured - credential.<url>.username
+#     plus any extra git settings listed under the account in the accounts file
 #   - includeIf entries in ~/.gitconfig
 #   (If your default identity lives in ~/.config/git/config instead, and
 #   ~/.gitconfig has no [user] settings, the per-account files go to
@@ -288,9 +289,28 @@ extend_key() {
 #
 # Each account needs at least one of ssh_user / https_user.
 #
+# Lines of the form "section.key = value" below an account add that git
+# setting to the account's config, e.g. for Git Credential Manager:
+#   azure-work|ssh.dev.azure.com|git|azure-work|Name|mail|login|rsa
+#       credential.msauthUseBroker = false
+#       credential.msauthFlow = system
+# A key given more than once gets every value. Keys the script writes itself
+# (user.name, core.sshCommand, ...) cannot be set this way.
+#
 # Blank lines and lines starting with '#' are ignored.
 # ---------------------------------------------------------------------------
+
+# Rejects a key that would contradict a value the script writes itself.
+is_managed_key() {
+  case "${1,,}" in
+    user.name|user.email|user.signingkey|core.sshcommand|commit.gpgsign|tag.gpgsign|credential.*.username) return 0 ;;
+  esac
+  return 1
+}
+
 ACCOUNTS=()
+declare -A EXTRA_SETTINGS=()   # alias -> "key<TAB>value" lines
+setting_check="$(mktemp)"; TMP_FILES+=("$setting_check")
 SEEN_ALIASES=()
 SEEN_FOLDERS=()
 SEEN_KEYS=()
@@ -304,6 +324,32 @@ while IFS= read -r line || [ -n "$line" ]; do
   case "$trimmed" in
     \#*) continue ;;
   esac
+  # The alias may not contain '=', so an account line always has a '|' before
+  # its first '='.
+  before_eq="${trimmed%%=*}"
+  if [ "$before_eq" != "$trimmed" ] && [[ "$before_eq" != *"|"* ]]; then
+    setting_key="$(trim "$before_eq")"
+    setting_value="$(trim "${trimmed#*=}")"
+    if [ "${#SEEN_ALIASES[@]}" -eq 0 ]; then
+      echo "ERROR: line $lineno in $ACCOUNTS_FILE sets '$setting_key' before any account." >&2
+      echo "  Put git settings below the account line they belong to." >&2
+      exit 1
+    fi
+    if is_managed_key "$setting_key"; then
+      echo "ERROR: line $lineno in $ACCOUNTS_FILE sets '$setting_key', which the script writes itself." >&2
+      echo "  Change it through the account line instead." >&2
+      exit 1
+    fi
+    # git itself knows which keys are valid.
+    if ! git config --file "$setting_check" --add "$setting_key" "$setting_value" 2>/dev/null; then
+      echo "ERROR: line $lineno in $ACCOUNTS_FILE has an invalid git setting:" >&2
+      echo "  $trimmed" >&2
+      echo "  expected 'section.key = value', e.g. credential.msauthFlow = system" >&2
+      exit 1
+    fi
+    EXTRA_SETTINGS["${SEEN_ALIASES[-1]}"]+="$setting_key"$'\t'"$setting_value"$'\n'
+    continue
+  fi
   field_count="$(awk -F'|' '{print NF}' <<< "$trimmed")"
   if [ "$field_count" -lt 6 ] || [ "$field_count" -gt 8 ]; then
     echo "ERROR: invalid line $lineno in $ACCOUNTS_FILE" >&2
@@ -755,6 +801,11 @@ EOF
 EOF
   fi
 
+  while IFS=$'\t' read -r setting_key setting_value; do
+    [ -n "$setting_key" ] || continue
+    git config --file "$desired_cfg" --add "$setting_key" "$setting_value"
+  done <<< "${EXTRA_SETTINGS[$alias]:-}"
+
   # 4c. Compare current against desired and report every difference.
   if [ ! -f "$gitconfig_path" ]; then
     CREATED=$((CREATED + 1))
@@ -1117,7 +1168,14 @@ for entry in "${ACCOUNTS[@]}"; do
     echo "                   clone $ssh_user@$ssh_host:$ssh_repo $PROJECT_BASE/$folder/repo"
   fi
   if [ -n "$https_user" ]; then
-    echo "       HTTPS:  git clone https://$https_user@$https_host/$https_repo $PROJECT_BASE/$folder/repo"
+    # Like the SSH key, credential settings are not active yet during the clone.
+    clone_opts=""
+    while IFS=$'\t' read -r setting_key setting_value; do
+      case "${setting_key,,}" in
+        credential.*) clone_opts+="-c $(printf '%q' "$setting_key=$setting_value") " ;;
+      esac
+    done <<< "${EXTRA_SETTINGS[$alias]:-}"
+    echo "       HTTPS:  git ${clone_opts}clone https://$https_user@$https_host/$https_repo $PROJECT_BASE/$folder/repo"
   else
     echo "       HTTPS:  not configured (add a 7th field 'https_user' in $(basename "$ACCOUNTS_FILE"))"
   fi

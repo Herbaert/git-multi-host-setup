@@ -23,6 +23,12 @@
 #
 # Each account needs at least one of ssh_user / https_user.
 #
+# Lines of the form "section.key = value" below an account add that git
+# setting to the account's config (see the Azure DevOps example below).
+# A key given more than once gets every value. Keys the script writes itself
+# (user.name, user.email, user.signingkey, core.sshCommand, commit.gpgsign,
+# tag.gpgsign, credential.<url>.username) cannot be set this way.
+#
 # Blank lines and lines starting with '#' are ignored.
 #
 # Copy this file to accounts.conf and fill in your real data:
@@ -41,3 +47,6 @@ company-gitea|git.company.example|git|company-gitea|Your Name (Company)|work@com
 # Azure DevOps: SSH with an RSA key (8th field) and HTTPS. For SSH only,
 # leave the 7th field empty: ...|work@company.example||rsa
 azure-work|ssh.dev.azure.com|git|azure-work|Your Name (Company)|work@company.example|your-azure-login|rsa
+    # Git Credential Manager: sign in through the browser instead of the OS broker
+    credential.msauthUseBroker = false
+    credential.msauthFlow = system

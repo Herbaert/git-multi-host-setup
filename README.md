@@ -14,6 +14,7 @@ For every account defined in the accounts file, it automatically:
   - `user.signingkey`, `commit.gpgsign = true`, `tag.gpgsign = true`
   - `core.sshCommand` → automatically uses the right SSH key (SSH accounts)
   - `credential.https://<host>.username` → **only** the username (HTTPS accounts)
+  - any extra git settings listed under the account (see [Extra git settings](#extra-git-settings))
 - appends an `includeIf "gitdir:..."` entry to `~/.gitconfig` that loads the right config as soon as you are inside that directory
 - sets a global `credential.helper` (only if none is configured yet) so an HTTPS token typed once is remembered
 
@@ -57,6 +58,9 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
 
    Every account needs at least one of `ssh_user` / `https_user`; the script
    aborts if both are missing.
+
+   Lines of the form `section.key = value` below an account add git settings
+   to that account's config, see [Extra git settings](#extra-git-settings).
 
    Blank lines and lines starting with `#` are ignored. Whitespace around fields
    is stripped, and `work`, `work/` and `./work` name the same folder.
@@ -190,6 +194,31 @@ Everything after the clone – fetch, push, commit, signing – is picked up aut
 git remote set-url origin https://your-handle@github.com/org/repo.git   # SSH → HTTPS
 git remote set-url origin git@github.com:org/repo.git                   # HTTPS → SSH
 ```
+
+## Extra git settings
+
+The per-account config is regenerated on every run, so settings added to it by hand would be lost. Put them into `accounts.conf` instead, as `section.key = value` lines below the account they belong to – indenting them is optional but reads well:
+
+```
+azure-work|ssh.dev.azure.com|git|azure-work|Your Name|work@company.example|your-login|rsa
+    credential.msauthUseBroker = false
+    credential.msauthFlow = system
+```
+
+This writes
+
+```ini
+[credential]
+	msauthUseBroker = false
+	msauthFlow = system
+```
+
+into `~/.gitconfig-azure-work`, so it applies to every repo under that project folder. Like every other setting there, changes show up in the diff on the next run.
+
+- Use the dotted form `git config` takes: `credential.msauthFlow`, or with a subsection `credential.https://dev.azure.com.msauthFlow`.
+- A key given more than once gets every value, e.g. several `url.<base>.insteadOf`.
+- Keys the script writes itself (`user.name`, `user.email`, `user.signingkey`, `core.sshCommand`, `commit.gpgsign`, `tag.gpgsign`, `credential.<url>.username`) are rejected – change those through the account line.
+- `includeIf` does not apply during `git clone`, so the printed HTTPS clone command passes `credential.*` settings with `-c`.
 
 ## Idempotency & updates
 

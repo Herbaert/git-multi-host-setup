@@ -35,6 +35,27 @@ t_empty_fields() { new_sandbox
   printf '|github.com|git|f|N||h\n' > "$ACC"; run >/dev/null
   echo "alias=$(count 'alias' < "$SB/err.txt"),email=$(count 'git_email' < "$SB/err.txt")"; }
 
+# --- extra git settings ---------------------------------------------------------
+t_settings() { new_sandbox
+  printf 'az|dev.azure.com||fa|A|a@x.io|me\n  credential.msauthUseBroker = false\n  credential.msauthFlow = system\n' > "$ACC"; run >/dev/null
+  local cfg="$HOME/.gitconfig-az" flow broker hint
+  flow="$(git config --file "$cfg" --get credential.msauthflow)"
+  broker="$(git config --file "$cfg" --get credential.msauthusebroker)"
+  hint="$(count 'git -c credential.msauthUseBroker=false -c credential.msauthFlow=system clone https://me@' < "$SB/out.txt")"
+  printf 'az|dev.azure.com||fa|A|a@x.io|me\n  credential.msauthFlow = system\n' > "$ACC"; run >/dev/null
+  echo "flow=$flow,broker=$broker,hint=$hint,removed=$(git config --file "$cfg" --get credential.msauthusebroker || echo yes),reported=$(count '\- credential.msauthusebroker' < "$SB/out.txt")"; }
+
+t_settings_multi() { new_sandbox
+  printf 'a|github.com|git|fa|A|a@x.io\nurl.git@github.com:.insteadOf = gh:\nurl.git@github.com:.insteadOf = github:\n' > "$ACC"; run >/dev/null; run >/dev/null
+  echo "values=$(git config --file "$HOME/.gitconfig-a" --get-all url.git@github.com:.insteadof | tr '\n' ' '),unchanged=$(count 'Git config unchanged' < "$SB/out.txt")"; }
+
+t_settings_errors() { new_sandbox
+  local before managed bad
+  printf 'credential.msauthFlow = system\na|github.com|git|fa|A|a@x.io\n' > "$ACC"; before="$(run)"
+  printf 'a|github.com|git|fa|A|a@x.io\n  User.Email = other@x.io\n' > "$ACC"; managed="$(run)"
+  printf 'a|github.com|git|fa|A|a@x.io\n  nodot = 1\n' > "$ACC"; bad="$(run)"
+  echo "before=$before,managed=$managed,bad=$bad,files=$(find "$HOME" -mindepth 1 | wc -l | tr -d ' ')"; }
+
 # --- includeIf -----------------------------------------------------------------
 t_handover() { new_sandbox
   printf 'work|github.com|git|team|W|w@x.io\n' > "$ACC"; run >/dev/null
@@ -233,6 +254,13 @@ check "no // in gitdir"                     "0"           "$(t_folder_spelling)"
 check "acme-dev/acme_dev rejected"          "1"           "$(t_key_collision)"
 check "unknown ssh_key_type rejected"       "1"           "$(t_bad_key_type)"
 check "all empty fields named"              "alias=1,email=1" "$(t_empty_fields)"
+
+banner "Extra git settings"
+check "written, shown in clone hint, removable" \
+      "flow=system,broker=false,hint=1,removed=yes,reported=1"      "$(t_settings)"
+check "repeated key keeps every value"      "values=gh: github: ,unchanged=1" "$(t_settings_multi)"
+check "misplaced, managed and invalid keys abort first" \
+      "before=1,managed=1,bad=1,files=0"                             "$(t_settings_errors)"
 
 banner "includeIf"
 check "folder handover keeps both mappings" "mappings=2,hint=0"      "$(t_handover)"
