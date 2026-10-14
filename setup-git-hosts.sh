@@ -31,10 +31,10 @@
 # credential helper keeps it from then on.
 #
 # Protocols are chosen per account:
-#   - SSH + HTTPS  -> ssh_user and https_user both set
-#   - SSH only     -> https_user left out (7th field omitted/empty)
-#   - HTTPS only   -> ssh_user left empty, e.g. "alias|github.com||folder|..."
-#                     no SSH key is generated and no core.sshCommand written
+#   - SSH + HTTPS  -> sshUser and httpsUser both set
+#   - SSH only     -> httpsUser not set
+#   - HTTPS only   -> sshUser not set or empty: no SSH key is generated and
+#                     no core.sshCommand written
 #
 # GPG WARNING: the generated GPG keys are created WITHOUT a passphrase
 # (%no-protection) so that the script can run fully unattended. This means
@@ -196,7 +196,7 @@ contains() {
 # Sets globals on purpose. Each field is trimmed because " github.com" would
 # only fail at push time.
 parse_entry() {
-  IFS='|' read -r alias hostname ssh_user folder name email https_user ssh_key_type <<< "$1"
+  IFS="$ENTRY_SEP" read -r alias hostname ssh_user folder name email https_user ssh_key_type <<< "$1"
   alias="$(trim "$alias")"
   hostname="$(trim "$hostname")"
   ssh_user="$(trim "$ssh_user")"
@@ -262,43 +262,64 @@ extend_key() {
     && gpg ${opts[@]+"${opts[@]}"} --quick-set-expire "$1" 2y '*' >/dev/null 2>"$err"
 }
 
+# Reading the accounts file needs git already.
+if ! command -v git >/dev/null 2>&1; then
+  echo "ERROR: 'git' not found. Please install git and run again." >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
-# Format of each line in the accounts file:
+# The accounts file uses git's own config syntax, see accounts.conf.example:
+#
+#   [defaults]
+#       name = Your Name
+#       sshUser = git
+#
+#   [account "azure-work"]
+#       host = ssh.dev.azure.com
+#       folder = azure-work
+#       email = work@company.example
+#       httpsUser = your-login
+#       sshKeyType = rsa
+#       config = credential.msauthUseBroker=false
+#       config = credential.msauthFlow=system
+#
+# [account "<alias>"] -> one per account. The alias names the key file and
+#                        git config, e.g. github-work (NOT part of clone URLs)
+# host       -> real hostname, e.g. github.com (used when cloning).
+#               For Azure DevOps either ssh.dev.azure.com or dev.azure.com,
+#               SSH and HTTPS then each get the right one.
+# folder     -> relative path under the project base directory
+#               ($PROJECT_BASE, default ~/projects), e.g. github-work
+# name       -> name used in commits made in this directory
+# email      -> e-mail used in commits made in this directory
+# sshUser    -> OPTIONAL: usually "git". Not set or empty disables SSH for
+#               the account (no key is generated, no core.sshCommand)
+# httpsUser  -> OPTIONAL: login name on that host, used for HTTPS remotes.
+#               Only the username is stored; the password/token is asked by
+#               git on the first push/fetch and then cached by the
+#               credential helper.
+# sshKeyType -> OPTIONAL: ed25519 (default) or rsa. Use rsa for hosts that
+#               do not accept ed25519 keys, e.g. Azure DevOps.
+# config     -> OPTIONAL, repeatable: "section.key=value", a git setting for
+#               the account's config. A key given more than once gets every
+#               value. Keys the script writes itself (user.name,
+#               core.sshCommand, ...) cannot be set this way.
+#
+# [defaults] takes the same keys except folder; an account's own value wins,
+# "sshUser =" in an account turns a default SSH user off again. Default
+# config values come before the account's own.
+#
+# Each account needs at least one of sshUser / httpsUser.
+#
+# The older line format is still read, one account per line:
 #   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user[|ssh_key_type]]
-#
-# alias          -> internal identifier for the key filename & git config,
-#                   e.g. github-work (does NOT appear in the clone URL)
-# hostname       -> real hostname, e.g. github.com (used when cloning).
-#                   For Azure DevOps either ssh.dev.azure.com or dev.azure.com,
-#                   SSH and HTTPS then each get the right one.
-# ssh_user       -> usually "git"; leave EMPTY to disable SSH for this
-#                   account (HTTPS only - no key is generated, no
-#                   core.sshCommand is written)
-# project_folder -> relative path under the project base directory
-#                   ($PROJECT_BASE, default ~/projects), e.g. github-work
-# git_name       -> name used in commits made in this directory
-# git_email      -> e-mail used in commits made in this directory
-# https_user     -> OPTIONAL: account/login name on that host, used for HTTPS
-#                   remotes. Only the username is stored; the password/token
-#                   is asked by git on the first push/fetch and then cached
-#                   by the credential helper. Leave the field out (or empty)
-#                   if you only ever use SSH.
-# ssh_key_type   -> OPTIONAL: ed25519 (default) or rsa. Use rsa for hosts that
-#                   do not accept ed25519 keys, e.g. Azure DevOps. For an
-#                   SSH-only account leave https_user empty: ...|email||rsa
-#
-# Each account needs at least one of ssh_user / https_user.
-#
-# Lines of the form "section.key = value" below an account add that git
-# setting to the account's config, e.g. for Git Credential Manager:
-#   azure-work|ssh.dev.azure.com|git|azure-work|Name|mail|login|rsa
-#       credential.msauthUseBroker = false
-#       credential.msauthFlow = system
-# A key given more than once gets every value. Keys the script writes itself
-# (user.name, core.sshCommand, ...) cannot be set this way.
-#
-# Blank lines and lines starting with '#' are ignored.
+# with "section.key = value" lines below an account for extra git settings.
 # ---------------------------------------------------------------------------
+
+# Internal field separator of an account entry, since '|' is a legal value in
+# the git-config format.
+ENTRY_SEP=$'\x1f'
 
 # Rejects a key that would contradict a value the script writes itself.
 is_managed_key() {
@@ -314,84 +335,49 @@ setting_check="$(mktemp)"; TMP_FILES+=("$setting_check")
 SEEN_ALIASES=()
 SEEN_FOLDERS=()
 SEEN_KEYS=()
-lineno=0
-while IFS= read -r line || [ -n "$line" ]; do
-  lineno=$((lineno + 1))
-  # Strip surrounding whitespace
-  trimmed="$(trim "$line")"
-  # Skip blank lines and comments
-  [ -z "$trimmed" ] && continue
-  case "$trimmed" in
-    \#*) continue ;;
-  esac
-  # The alias may not contain '=', so an account line always has a '|' before
-  # its first '='.
-  before_eq="${trimmed%%=*}"
-  if [ "$before_eq" != "$trimmed" ] && [[ "$before_eq" != *"|"* ]]; then
-    setting_key="$(trim "$before_eq")"
-    setting_value="$(trim "${trimmed#*=}")"
-    if [ "${#SEEN_ALIASES[@]}" -eq 0 ]; then
-      echo "ERROR: line $lineno in $ACCOUNTS_FILE sets '$setting_key' before any account." >&2
-      echo "  Put git settings below the account line they belong to." >&2
-      exit 1
-    fi
-    if is_managed_key "$setting_key"; then
-      echo "ERROR: line $lineno in $ACCOUNTS_FILE sets '$setting_key', which the script writes itself." >&2
-      echo "  Change it through the account line instead." >&2
-      exit 1
-    fi
-    # git itself knows which keys are valid.
-    if ! git config --file "$setting_check" --add "$setting_key" "$setting_value" 2>/dev/null; then
-      echo "ERROR: line $lineno in $ACCOUNTS_FILE has an invalid git setting:" >&2
-      echo "  $trimmed" >&2
-      echo "  expected 'section.key = value', e.g. credential.msauthFlow = system" >&2
-      exit 1
-    fi
-    EXTRA_SETTINGS["${SEEN_ALIASES[-1]}"]+="$setting_key"$'\t'"$setting_value"$'\n'
-    continue
-  fi
-  field_count="$(awk -F'|' '{print NF}' <<< "$trimmed")"
-  if [ "$field_count" -lt 6 ] || [ "$field_count" -gt 8 ]; then
-    echo "ERROR: invalid line $lineno in $ACCOUNTS_FILE" >&2
-    echo "  expected 6 to 8 '|'-separated fields, got $field_count:" >&2
-    echo "  $trimmed" >&2
-    exit 1
-  fi
-  parse_entry "$trimmed"
 
-  missing=""
-  [ -n "$alias" ]    || missing+=" alias"
-  [ -n "$hostname" ] || missing+=" hostname"
-  [ -n "$folder" ]   || missing+=" project_folder"
-  [ -n "$name" ]     || missing+=" git_name"
-  [ -n "$email" ]    || missing+=" git_email"
-  if [ -n "$missing" ]; then
-    echo "ERROR: line $lineno in $ACCOUNTS_FILE has empty required field(s):$missing" >&2
-    echo "  $trimmed" >&2
+# add_setting <where> <alias> <key> <value>
+add_setting() {
+  if is_managed_key "$3"; then
+    echo "ERROR: $1 in $ACCOUNTS_FILE sets '$3', which the script writes itself." >&2
+    echo "  Change it through the account's own fields instead." >&2
     exit 1
   fi
+  # git itself knows which keys are valid.
+  if ! git config --file "$setting_check" --add "$3" "$4" 2>/dev/null; then
+    echo "ERROR: $1 in $ACCOUNTS_FILE has an invalid git setting '$3'." >&2
+    echo "  Expected a key like credential.msauthFlow." >&2
+    exit 1
+  fi
+  EXTRA_SETTINGS["$2"]+="$3"$'\t'"$4"$'\n'
+}
+
+# add_account <where> <entry>: the checks both formats share.
+add_account() {
+  local where="$1" key_file i
+  parse_entry "$2"
   case "$alias" in
     *[!A-Za-z0-9._-]*|.*)
-      echo "ERROR: line $lineno in $ACCOUNTS_FILE has an unusable alias '$alias'." >&2
+      echo "ERROR: $where in $ACCOUNTS_FILE has an unusable alias '$alias'." >&2
       echo "  The alias becomes a filename ($(shown "$(account_config_path '<alias>')")); allowed are" >&2
       echo "  letters, digits, '.', '_' and '-', and it must not start with '.'." >&2
       exit 1
       ;;
   esac
   if contains "$alias" ${SEEN_ALIASES[@]+"${SEEN_ALIASES[@]}"}; then
-    echo "ERROR: line $lineno in $ACCOUNTS_FILE reuses the alias '$alias'." >&2
+    echo "ERROR: $where in $ACCOUNTS_FILE reuses the alias '$alias'." >&2
     echo "  Both accounts would share $(shown "$(account_config_path "$alias")") and overwrite each other." >&2
     exit 1
   fi
   if contains "$folder" ${SEEN_FOLDERS[@]+"${SEEN_FOLDERS[@]}"}; then
-    echo "ERROR: line $lineno in $ACCOUNTS_FILE reuses the project_folder '$folder'." >&2
+    echo "ERROR: $where in $ACCOUNTS_FILE reuses the project folder '$folder'." >&2
     echo "  A project directory can only map to one account - give '$alias' its own folder." >&2
     exit 1
   fi
   case "$ssh_key_type" in
     ed25519|rsa) ;;
     *)
-      echo "ERROR: line $lineno in $ACCOUNTS_FILE has an unknown ssh_key_type '$ssh_key_type'." >&2
+      echo "ERROR: $where in $ACCOUNTS_FILE has an unknown SSH key type '$ssh_key_type'." >&2
       echo "  Allowed are 'ed25519' (default) and 'rsa'." >&2
       exit 1
       ;;
@@ -399,7 +385,7 @@ while IFS= read -r line || [ -n "$line" ]; do
   key_file="$(ssh_key_path "$alias" "$ssh_key_type")"
   for i in ${SEEN_KEYS[@]+"${!SEEN_KEYS[@]}"}; do
     if [ "${SEEN_KEYS[i]}" = "$key_file" ]; then
-      echo "ERROR: line $lineno in $ACCOUNTS_FILE: alias '$alias' and alias '${SEEN_ALIASES[i]}'" >&2
+      echo "ERROR: $where in $ACCOUNTS_FILE: alias '$alias' and alias '${SEEN_ALIASES[i]}'" >&2
       echo "  map to the same SSH key file $key_file ('-' becomes '_')," >&2
       echo "  so the second account would silently reuse the first one's key." >&2
       exit 1
@@ -408,9 +394,165 @@ while IFS= read -r line || [ -n "$line" ]; do
   SEEN_ALIASES+=("$alias")
   SEEN_FOLDERS+=("$folder")
   SEEN_KEYS+=("$key_file")
+  ACCOUNTS+=("$2")
+}
 
-  ACCOUNTS+=("$trimmed")
-done < "$ACCOUNTS_FILE"
+read_line_format() {
+  local lineno=0 line trimmed before_eq field_count missing
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    trimmed="$(trim "$line")"
+    [ -z "$trimmed" ] && continue
+    case "$trimmed" in
+      \#*) continue ;;
+    esac
+    # The alias may not contain '=', so an account line always has a '|' before
+    # its first '='.
+    before_eq="${trimmed%%=*}"
+    if [ "$before_eq" != "$trimmed" ] && [[ "$before_eq" != *"|"* ]]; then
+      if [ "${#SEEN_ALIASES[@]}" -eq 0 ]; then
+        echo "ERROR: line $lineno in $ACCOUNTS_FILE sets '$(trim "$before_eq")' before any account." >&2
+        echo "  Put git settings below the account line they belong to." >&2
+        exit 1
+      fi
+      add_setting "line $lineno" "${SEEN_ALIASES[-1]}" "$(trim "$before_eq")" "$(trim "${trimmed#*=}")"
+      continue
+    fi
+    field_count="$(awk -F'|' '{print NF}' <<< "$trimmed")"
+    if [ "$field_count" -lt 6 ] || [ "$field_count" -gt 8 ]; then
+      echo "ERROR: invalid line $lineno in $ACCOUNTS_FILE" >&2
+      echo "  expected 6 to 8 '|'-separated fields, got $field_count:" >&2
+      echo "  $trimmed" >&2
+      exit 1
+    fi
+    parse_entry "${trimmed//|/$ENTRY_SEP}"
+    missing=""
+    [ -n "$alias" ]    || missing+=" alias"
+    [ -n "$hostname" ] || missing+=" hostname"
+    [ -n "$folder" ]   || missing+=" project_folder"
+    [ -n "$name" ]     || missing+=" git_name"
+    [ -n "$email" ]    || missing+=" git_email"
+    if [ -n "$missing" ]; then
+      echo "ERROR: line $lineno in $ACCOUNTS_FILE has empty required field(s):$missing" >&2
+      echo "  $trimmed" >&2
+      exit 1
+    fi
+    add_account "line $lineno" "${trimmed//|/$ENTRY_SEP}"
+  done < "$ACCOUNTS_FILE"
+}
+
+# git lowercases key names, the messages use the spelling from the docs.
+key_label() {
+  case "$1" in
+    sshuser) printf 'sshUser' ;;
+    httpsuser) printf 'httpsUser' ;;
+    sshkeytype) printf 'sshKeyType' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+read_gitconfig_format() {
+  local err record key value section var rest sub where alias_ v
+  local -A vals=()     # "<alias>/<key>" -> value, alias empty for [defaults]
+  local -A configs=()  # "/<alias>" -> "section.key=value" lines, "/" for [defaults]
+  local order=() a fields missing
+  if ! err="$(git config --file "$ACCOUNTS_FILE" --list 2>&1 >/dev/null)"; then
+    echo "ERROR: $ACCOUNTS_FILE is not valid git config syntax:" >&2
+    echo "  $err" >&2
+    exit 1
+  fi
+  # -z because subsection names may contain '=', which breaks a key=value split.
+  while IFS= read -r -d '' record; do
+    key="${record%%$'\n'*}"
+    section="${key%%.*}"
+    var="${key##*.}"
+    rest="${key#*.}"
+    sub=""
+    [[ "$rest" == *.* ]] && sub="${rest%.*}"
+    if [ "$section" = "defaults" ] && [ -z "$sub" ]; then
+      alias_=""
+      where="[defaults]"
+    elif [ "$section" = "account" ] && [ -n "$sub" ]; then
+      alias_="$sub"
+      where="[account \"$sub\"]"
+    else
+      echo "ERROR: $ACCOUNTS_FILE has an unknown setting '$key'." >&2
+      echo "  Only [defaults] and [account \"<alias>\"] sections are allowed." >&2
+      exit 1
+    fi
+    if [ "$key" = "$record" ]; then
+      echo "ERROR: $where in $ACCOUNTS_FILE: '$(key_label "$var")' needs a value, as in '$(key_label "$var") = ...'." >&2
+      exit 1
+    fi
+    value="${record#*$'\n'}"
+    case "$var" in
+      host|sshuser|name|email|httpsuser|sshkeytype) ;;
+      folder)
+        if [ -z "$alias_" ]; then
+          echo "ERROR: [defaults] in $ACCOUNTS_FILE cannot set folder, every account needs its own." >&2
+          exit 1
+        fi
+        ;;
+      config)
+        if [[ "$value" != *=* ]]; then
+          echo "ERROR: $where in $ACCOUNTS_FILE has 'config = $value'." >&2
+          echo "  Expected 'config = section.key=value', e.g. config = credential.msauthFlow=system" >&2
+          exit 1
+        fi
+        configs["/$alias_"]+="$value"$'\n'
+        ;;
+      *)
+        echo "ERROR: $where in $ACCOUNTS_FILE has an unknown key '$var'." >&2
+        echo "  Allowed are host, folder, name, email, sshUser, httpsUser, sshKeyType and config." >&2
+        exit 1
+        ;;
+    esac
+    if [ -n "$alias_" ] && ! contains "$alias_" ${order[@]+"${order[@]}"}; then
+      order+=("$alias_")
+    fi
+    [ "$var" = "config" ] && continue
+    if [ -n "${vals[$alias_/$var]+set}" ]; then
+      echo "ERROR: $where in $ACCOUNTS_FILE sets '$(key_label "$var")' twice." >&2
+      exit 1
+    fi
+    vals["$alias_/$var"]="$value"
+  done < <(git config --file "$ACCOUNTS_FILE" --list -z)
+
+  for a in ${order[@]+"${order[@]}"}; do
+    where="[account \"$a\"]"
+    fields=("$a")
+    missing=""
+    for var in host sshuser folder name email httpsuser sshkeytype; do
+      if [ -n "${vals[$a/$var]+set}" ]; then
+        v="${vals[$a/$var]}"
+      else
+        v="${vals[/$var]:-}"
+      fi
+      case "$var" in
+        host|folder|name|email) [ -n "$(trim "$v")" ] || missing+=" $var" ;;
+      esac
+      fields+=("$v")
+    done
+    if [ -n "$missing" ]; then
+      echo "ERROR: $where in $ACCOUNTS_FILE is missing:$missing" >&2
+      exit 1
+    fi
+    add_account "$where" "$(IFS="$ENTRY_SEP"; printf '%s' "${fields[*]}")"
+    while IFS= read -r v; do
+      [ -n "$v" ] || continue
+      add_setting "$where" "$a" "$(trim "${v%%=*}")" "$(trim "${v#*=}")"
+    done <<< "${configs[/]:-}${configs[/$a]:-}"
+  done
+}
+
+# The git-config format starts with a section header, the line format never does.
+HTTPS_USER_FIELD="a 7th field 'https_user'"
+if grep -v -E '^[[:space:]]*([#;]|$)' "$ACCOUNTS_FILE" | head -n 1 | grep -q '^[[:space:]]*\['; then
+  HTTPS_USER_FIELD="httpsUser"
+  read_gitconfig_format
+else
+  read_line_format
+fi
 
 if [ "${#ACCOUNTS[@]}" -eq 0 ]; then
   echo "ERROR: no accounts found in $ACCOUNTS_FILE." >&2
@@ -449,11 +591,6 @@ is_known_config() {
 
 if ! command -v gpg >/dev/null 2>&1; then
   echo "ERROR: 'gpg' not found. Please install GnuPG (e.g. 'apt install gnupg' or 'brew install gnupg') and run again." >&2
-  exit 1
-fi
-
-if ! command -v git >/dev/null 2>&1; then
-  echo "ERROR: 'git' not found. Please install git and run again." >&2
   exit 1
 fi
 
@@ -626,8 +763,8 @@ HTTPS_ACCOUNTS=0
 for entry in "${ACCOUNTS[@]}"; do
   parse_entry "$entry"
   if [ -z "$ssh_user" ] && [ -z "$https_user" ]; then
-    echo "ERROR: account '$alias' has neither an ssh_user nor an https_user." >&2
-    echo "  Set ssh_user (usually 'git') for SSH, https_user for HTTPS, or both." >&2
+    echo "ERROR: account '$alias' has neither an SSH user nor an HTTPS user." >&2
+    echo "  Set an SSH user (usually 'git'), an HTTPS user, or both." >&2
     exit 1
   fi
   if [ -n "$ssh_user" ]; then
@@ -1177,7 +1314,7 @@ for entry in "${ACCOUNTS[@]}"; do
     done <<< "${EXTRA_SETTINGS[$alias]:-}"
     echo "       HTTPS:  git ${clone_opts}clone https://$https_user@$https_host/$https_repo $PROJECT_BASE/$folder/repo"
   else
-    echo "       HTTPS:  not configured (add a 7th field 'https_user' in $(basename "$ACCOUNTS_FILE"))"
+    echo "       HTTPS:  not configured (set $HTTPS_USER_FIELD in $(basename "$ACCOUNTS_FILE"))"
   fi
 done
 echo
