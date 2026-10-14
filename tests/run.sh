@@ -56,6 +56,79 @@ t_settings_errors() { new_sandbox
   printf 'a|github.com|git|fa|A|a@x.io\n  nodot = 1\n' > "$ACC"; bad="$(run)"
   echo "before=$before,managed=$managed,bad=$bad,files=$(find "$HOME" -mindepth 1 | wc -l | tr -d ' ')"; }
 
+# --- git-config format ----------------------------------------------------------
+# Same accounts in both formats must produce byte-identical account configs.
+t_gc_same_as_lines() { new_sandbox
+  printf 'a|github.com|git|fa|A|a@x.io|ha|rsa\n  credential.msauthFlow = system\nb|gitlab.com||fb|B|b@x.io|hb\n' > "$ACC"; run >/dev/null
+  mv "$HOME/.gitconfig-a" "$SB/a1"; mv "$HOME/.gitconfig-b" "$SB/b1"
+  cat > "$ACC" <<'EOF'
+[account "a"]
+    host = github.com
+    sshUser = git
+    folder = fa
+    name = A
+    email = a@x.io
+    httpsUser = ha
+    sshKeyType = rsa
+    config = credential.msauthFlow=system
+[account "b"]
+    host = gitlab.com
+    folder = fb
+    name = B
+    email = b@x.io
+    httpsUser = hb
+EOF
+  local rc same=no; rc="$(run)"
+  cmp -s "$SB/a1" "$HOME/.gitconfig-a" && cmp -s "$SB/b1" "$HOME/.gitconfig-b" && same=yes
+  echo "rc=$rc,same=$same"; }
+
+t_gc_defaults() { new_sandbox
+  cat > "$ACC" <<'EOF'
+; comment in git's other style
+[defaults]
+    name = Default Name
+    sshUser = git
+    config = core.autocrlf=input
+[account "a"]
+    host = github.com
+    folder = fa
+    name = "A | B"
+    email = a@x.io
+    config = core.autocrlf=false
+[account "h"]
+    host = github.com
+    folder = fh
+    email = h@x.io
+    sshUser =
+    httpsUser = handle
+EOF
+  run >/dev/null
+  echo "name=$(git config --file "$HOME/.gitconfig-a" --get user.name),crlf=$(git config --file "$HOME/.gitconfig-a" --get-all core.autocrlf | tr '\n' ' '),default_name=$(git config --file "$HOME/.gitconfig-h" --get user.name),h_ssh=$(git config --file "$HOME/.gitconfig-h" --get core.sshCommand || echo none),a_ssh=$(git config --file "$HOME/.gitconfig-a" --get core.sshCommand | count 'id_ed25519_a ')"; }
+
+t_gc_errors() { new_sandbox
+  local acc out=""
+  for acc in \
+    '[account "a"]\n host = github.com\n folder = f\n name = A\n email = a@x.io\n sshUser = git\n sshKeyTyp = rsa\n' \
+    '[acount "a"]\n host = github.com\n' \
+    '[account "a"]\n host = github.com\n sshUser = git\n name = A\n' \
+    '[defaults]\n folder = f\n' \
+    '[account "a"]\n host = github.com\n folder = f\n name = A\n email = a@x.io\n sshUser = git\n config = credential.msauthFlow\n' \
+    '[account "a"]\n host = github.com\n host = gitlab.com\n' \
+    '[account "a"]\n host = github.com\n folder = f\n name = A\n email = a@x.io\n sshUser\n' \
+    '[account "a"\n host = github.com\n'; do
+    printf '%b' "$acc" > "$ACC"
+    out+="$(run)"
+  done
+  echo "rcs=$out,files=$(find "$HOME" -mindepth 1 | wc -l | tr -d ' ')"; }
+
+t_gc_missing_named() { new_sandbox
+  printf '[account "a"]\n host = github.com\n sshUser = git\n name = A\n' > "$ACC"; run >/dev/null
+  grep -o 'missing:.*' "$SB/err.txt"; }
+
+t_example() { new_sandbox
+  ACC="$(dirname "$SCRIPT")/accounts.conf.example"
+  echo "rc=$(run DRY_RUN=1),accounts=$(grep -o '^Summary: [0-9]*' "$SB/out.txt")"; }
+
 # --- includeIf -----------------------------------------------------------------
 t_handover() { new_sandbox
   printf 'work|github.com|git|team|W|w@x.io\n' > "$ACC"; run >/dev/null
@@ -261,6 +334,14 @@ check "written, shown in clone hint, removable" \
 check "repeated key keeps every value"      "values=gh: github: ,unchanged=1" "$(t_settings_multi)"
 check "misplaced, managed and invalid keys abort first" \
       "before=1,managed=1,bad=1,files=0"                             "$(t_settings_errors)"
+
+banner "git-config format"
+check "same configs as the line format"     "rc=0,same=yes"           "$(t_gc_same_as_lines)"
+check "defaults, overrides, '|' in values" \
+      "name=A | B,crlf=input false ,default_name=Default Name,h_ssh=none,a_ssh=1" "$(t_gc_defaults)"
+check "bad keys, sections and syntax abort first" "rcs=11111111,files=0" "$(t_gc_errors)"
+check "missing keys named"                  "missing: folder email"   "$(t_gc_missing_named)"
+check "accounts.conf.example is valid"      "rc=0,accounts=Summary: 5" "$(t_example)"
 
 banner "includeIf"
 check "folder handover keeps both mappings" "mappings=2,hint=0"      "$(t_handover)"

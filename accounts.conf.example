@@ -1,52 +1,78 @@
-# accounts.conf
+# accounts.conf - same syntax as ~/.gitconfig
 #
-# One line per account, format:
-#   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user[|ssh_key_type]]
+# [account "<alias>"] -> one section per account. The alias names the key
+#                        file and git config, e.g. github-work (it does NOT
+#                        appear in the clone URL)
+# host       -> real hostname, e.g. github.com (used when cloning).
+#               For Azure DevOps either ssh.dev.azure.com or dev.azure.com,
+#               SSH and HTTPS then each get the right one.
+# folder     -> relative path under ~/projects, e.g. github-work
+# name       -> name used in commits made in this directory
+# email      -> e-mail used in commits made in this directory
+# sshUser    -> OPTIONAL: usually "git". Not set or empty: no SSH for this
+#               account (no SSH key is generated for it)
+# httpsUser  -> OPTIONAL: your login name on that host, used for HTTPS
+#               remotes. Only the username is stored in the git config -
+#               the password/token is asked by git on the first push/fetch
+#               and then cached by the credential helper.
+# sshKeyType -> OPTIONAL: ed25519 (default) or rsa. Use rsa for hosts that
+#               do not accept ed25519 keys, e.g. Azure DevOps.
+# config     -> OPTIONAL, repeatable: section.key=value, an extra git setting
+#               for this account. A key given more than once gets every value.
+#               Keys the script writes itself (user.name, user.email,
+#               user.signingkey, core.sshCommand, commit.gpgsign, tag.gpgsign,
+#               credential.<url>.username) cannot be set this way.
 #
-# alias          -> internal identifier for the key filename & git config,
-#                    e.g. github-work (does NOT appear in the clone URL)
-# hostname       -> real hostname, e.g. github.com (used when cloning).
-#                    For Azure DevOps either ssh.dev.azure.com or dev.azure.com,
-#                    SSH and HTTPS then each get the right one.
-# ssh_user       -> usually "git"; leave EMPTY to disable SSH for this account
-#                    (HTTPS only: no SSH key is generated for it)
-# project_folder -> relative path under ~/projects, e.g. github-work
-# git_name       -> name used in commits made in this directory
-# git_email      -> e-mail used in commits made in this directory
-# https_user     -> OPTIONAL 7th field: your login name on that host, used for
-#                    HTTPS remotes. Only the username is stored in the git
-#                    config - the password/token is asked by git on the first
-#                    push/fetch and then cached by the credential helper.
-#                    Omit the field (or leave it empty) for SSH-only accounts.
-# ssh_key_type   -> OPTIONAL 8th field: ed25519 (default) or rsa. Use rsa for
-#                    hosts that do not accept ed25519 keys, e.g. Azure DevOps.
+# [defaults] takes the same keys except folder. An account's own value wins;
+# "sshUser =" (empty) in an account turns a default SSH user off again.
 #
-# Each account needs at least one of ssh_user / https_user.
-#
-# Lines of the form "section.key = value" below an account add that git
-# setting to the account's config (see the Azure DevOps example below).
-# A key given more than once gets every value. Keys the script writes itself
-# (user.name, user.email, user.signingkey, core.sshCommand, commit.gpgsign,
-# tag.gpgsign, credential.<url>.username) cannot be set this way.
-#
-# Blank lines and lines starting with '#' are ignored.
+# Each account needs at least one of sshUser / httpsUser.
 #
 # Copy this file to accounts.conf and fill in your real data:
 #   cp accounts.conf.example accounts.conf
 
-# SSH + HTTPS (7 fields)
-github-personal|github.com|git|github-personal|Your Name|personal@example.com|your-gh-handle
-github-work|github.com|git|github-work|Your Name (Company)|work@company.example|your-work-gh-handle
+[defaults]
+    name = Your Name
+    sshUser = git
 
-# HTTPS only (ssh_user field left empty -> no SSH key, no core.sshCommand)
-gitlab-work|gitlab.com||gitlab-work|Your Name (Company)|work@company.example|your-gl-handle
+# SSH + HTTPS
+[account "github-personal"]
+    host = github.com
+    folder = github-personal
+    email = personal@example.com
+    httpsUser = your-gh-handle
 
-# SSH only (6 fields, HTTPS username left out)
-company-gitea|git.company.example|git|company-gitea|Your Name (Company)|work@company.example
+[account "github-work"]
+    host = github.com
+    folder = github-work
+    name = Your Name (Company)
+    email = work@company.example
+    httpsUser = your-work-gh-handle
 
-# Azure DevOps: SSH with an RSA key (8th field) and HTTPS. For SSH only,
-# leave the 7th field empty: ...|work@company.example||rsa
-azure-work|ssh.dev.azure.com|git|azure-work|Your Name (Company)|work@company.example|your-azure-login|rsa
+# HTTPS only (empty sshUser overrides the default -> no SSH key, no core.sshCommand)
+[account "gitlab-work"]
+    host = gitlab.com
+    folder = gitlab-work
+    name = Your Name (Company)
+    email = work@company.example
+    sshUser =
+    httpsUser = your-gl-handle
+
+# SSH only (no httpsUser)
+[account "company-gitea"]
+    host = git.company.example
+    folder = company-gitea
+    name = Your Name (Company)
+    email = work@company.example
+
+# Azure DevOps: SSH with an RSA key and HTTPS
+[account "azure-work"]
+    host = ssh.dev.azure.com
+    folder = azure-work
+    name = Your Name (Company)
+    email = work@company.example
+    httpsUser = your-azure-login
+    sshKeyType = rsa
     # Git Credential Manager: sign in through the browser instead of the OS broker
-    credential.msauthUseBroker = false
-    credential.msauthFlow = system
+    config = credential.msauthUseBroker=false
+    config = credential.msauthFlow=system

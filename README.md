@@ -39,37 +39,49 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
    cp accounts.conf.example accounts.conf
    ```
 
-   One line per account, format:
+   The file uses the same syntax as `~/.gitconfig`, one section per account:
 
-   ```
-   alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user[|ssh_key_type]]
+   ```ini
+   [defaults]
+       name = Your Name
+       sshUser = git
+
+   [account "github-work"]
+       host = github.com
+       folder = github-work
+       email = work@company.example
+       httpsUser = your-gh-handle
    ```
 
-   | Field | Meaning |
+   | Key | Meaning |
    |---|---|
-   | `alias` | internal identifier for the key filename & git config (does not appear in the clone URL) |
-   | `hostname` | real hostname, e.g. `github.com`. For Azure DevOps either `ssh.dev.azure.com` or `dev.azure.com` – SSH then uses the former, HTTPS the latter |
-   | `ssh_user` | usually `git`; leave **empty** to disable SSH for this account (HTTPS only) |
-   | `project_folder` | relative path under `~/projects`, e.g. `github-work` |
-   | `git_name` | name used in commits made in this directory |
-   | `git_email` | e-mail used in commits made in this directory |
-   | `https_user` | *optional*: your login name on that host, used for HTTPS remotes. Omit the field for SSH-only accounts. |
-   | `ssh_key_type` | *optional*: `ed25519` (default) or `rsa` (4096 bit, key file `~/.ssh/id_rsa_<alias>`). Use `rsa` for hosts that do not accept ed25519, e.g. Azure DevOps. For an SSH-only account leave `https_user` empty: `...\|mail\|\|rsa` |
+   | `[account "<alias>"]` | one section per account. The alias is the internal identifier for the key filename & git config (does not appear in the clone URL) |
+   | `host` | real hostname, e.g. `github.com`. For Azure DevOps either `ssh.dev.azure.com` or `dev.azure.com` – SSH then uses the former, HTTPS the latter |
+   | `folder` | relative path under `~/projects`, e.g. `github-work` |
+   | `name` | name used in commits made in this directory |
+   | `email` | e-mail used in commits made in this directory |
+   | `sshUser` | *optional*: usually `git`. Not set or empty disables SSH for this account (HTTPS only) |
+   | `httpsUser` | *optional*: your login name on that host, used for HTTPS remotes |
+   | `sshKeyType` | *optional*: `ed25519` (default) or `rsa` (4096 bit, key file `~/.ssh/id_rsa_<alias>`). Use `rsa` for hosts that do not accept ed25519, e.g. Azure DevOps |
+   | `config` | *optional, repeatable*: `section.key=value`, an extra git setting for this account, see [Extra git settings](#extra-git-settings) |
 
-   Every account needs at least one of `ssh_user` / `https_user`; the script
+   `[defaults]` takes the same keys except `folder`. An account's own value
+   wins; an empty `sshUser =` in an account turns a default SSH user off again.
+
+   Every account needs at least one of `sshUser` / `httpsUser`; the script
    aborts if both are missing.
 
-   Lines of the form `section.key = value` below an account add git settings
-   to that account's config, see [Extra git settings](#extra-git-settings).
+   Comments start with `#` or `;`. Values are trimmed, and `work`, `work/` and
+   `./work` name the same folder.
 
-   Blank lines and lines starting with `#` are ignored. Whitespace around fields
-   is stripped, and `work`, `work/` and `./work` name the same folder.
+   The script aborts before writing anything on invalid syntax, on an unknown
+   section or key, on a missing required key, on an `sshKeyType` other than
+   `ed25519` or `rsa`, on an alias with characters other than letters, digits,
+   `.`, `_`, `-`, and on two accounts sharing a `folder` or an SSH key file
+   (`acme-dev` and `acme_dev` both map to `~/.ssh/id_ed25519_acme_dev`).
 
-   The script aborts on an empty required field, on an `ssh_key_type` other than
-   `ed25519` or `rsa`, on an `alias` with characters
-   other than letters, digits, `.`, `_`, `-`, and on two accounts sharing an
-   `alias`, a `project_folder` or an SSH key file (`acme-dev` and `acme_dev`
-   both map to `~/.ssh/id_ed25519_acme_dev`).
+   The older format with one `|`-separated line per account still works, see
+   [Line format](#line-format).
 
    By default `accounts.conf` is expected in the same directory as the script. A
    different file can be passed via `./setup-git-hosts.sh /path/to/other.conf`
@@ -125,13 +137,13 @@ Supported on macOS and Linux. Windows (Git Bash/MSYS) may work but is not tested
 
 The project directory decides which identity is used, not the protocol. Each account picks its protocols itself:
 
-| Account line | Effect |
+| Account settings | Effect |
 |---|---|
-| `alias\|github.com\|git\|folder\|Name\|mail\|handle` | SSH **and** HTTPS |
-| `alias\|github.com\|git\|folder\|Name\|mail` | SSH only – no HTTPS username |
-| `alias\|github.com\|\|folder\|Name\|mail\|handle` | **HTTPS only** – `ssh_user` empty, so no SSH key is generated and no `core.sshCommand` is written |
-| `alias\|ssh.dev.azure.com\|git\|folder\|Name\|mail\|\|rsa` | SSH only, with an **RSA** key instead of ed25519 |
-| `alias\|ssh.dev.azure.com\|git\|folder\|Name\|mail\|login\|rsa` | Azure DevOps with SSH (RSA) **and** HTTPS – the username is stored for `https://dev.azure.com` |
+| `sshUser = git`, `httpsUser = handle` | SSH **and** HTTPS |
+| `sshUser = git` | SSH only – no HTTPS username |
+| `httpsUser = handle`, no or empty `sshUser` | **HTTPS only** – no SSH key is generated and no `core.sshCommand` is written |
+| `sshUser = git`, `sshKeyType = rsa` | SSH with an **RSA** key instead of ed25519 |
+| `host = ssh.dev.azure.com`, `sshUser = git`, `httpsUser = login`, `sshKeyType = rsa` | Azure DevOps with SSH (RSA) **and** HTTPS – the username is stored for `https://dev.azure.com` |
 
 ### SSH
 
@@ -143,7 +155,7 @@ The key comes from `core.sshCommand` in the per-account config.
 
 ### HTTPS
 
-Set the 7th field (`https_user`) for the account, then clone with the username in the URL:
+Set `httpsUser` for the account, then clone with the username in the URL:
 
 ```bash
 git clone https://your-handle@github.com/org/repo.git ~/projects/github-work/repo
@@ -197,12 +209,17 @@ git remote set-url origin git@github.com:org/repo.git                   # HTTPS 
 
 ## Extra git settings
 
-The per-account config is regenerated on every run, so settings added to it by hand would be lost. Put them into `accounts.conf` instead, as `section.key = value` lines below the account they belong to – indenting them is optional but reads well:
+The per-account config is regenerated on every run, so settings added to it by hand would be lost. Put them into `accounts.conf` instead, as `config = section.key=value` in the account's section:
 
-```
-azure-work|ssh.dev.azure.com|git|azure-work|Your Name|work@company.example|your-login|rsa
-    credential.msauthUseBroker = false
-    credential.msauthFlow = system
+```ini
+[account "azure-work"]
+    host = ssh.dev.azure.com
+    folder = azure-work
+    email = work@company.example
+    httpsUser = your-login
+    sshKeyType = rsa
+    config = credential.msauthUseBroker=false
+    config = credential.msauthFlow=system
 ```
 
 This writes
@@ -215,9 +232,10 @@ This writes
 
 into `~/.gitconfig-azure-work`, so it applies to every repo under that project folder. Like every other setting there, changes show up in the diff on the next run.
 
+- `config` in `[defaults]` applies to every account, before the account's own values.
 - Use the dotted form `git config` takes: `credential.msauthFlow`, or with a subsection `credential.https://dev.azure.com.msauthFlow`.
 - A key given more than once gets every value, e.g. several `url.<base>.insteadOf`.
-- Keys the script writes itself (`user.name`, `user.email`, `user.signingkey`, `core.sshCommand`, `commit.gpgsign`, `tag.gpgsign`, `credential.<url>.username`) are rejected – change those through the account line.
+- Keys the script writes itself (`user.name`, `user.email`, `user.signingkey`, `core.sshCommand`, `commit.gpgsign`, `tag.gpgsign`, `credential.<url>.username`) are rejected – change those through the account's own keys.
 - `includeIf` does not apply during `git clone`, so the printed HTTPS clone command passes `credential.*` settings with `-c`.
 
 ## Idempotency & updates
@@ -225,14 +243,14 @@ into `~/.gitconfig-azure-work`, so it applies to every repo under that project f
 The script is safe to run repeatedly and doubles as an **update mechanism**: edit `accounts.conf` and run it again, and it reconciles the files on disk with what the accounts file now says.
 
 - **SSH/GPG keys, directories** – created if missing, left alone otherwise (a changed `git_email` does **not** regenerate the GPG key; delete the old one yourself if you really want a new one). Switching `ssh_key_type` creates a new key file and points `core.sshCommand` at it; the old key stays. A GPG key must match the e-mail exactly. An expired key is extended by 2 years and keeps its fingerprint, so you only re-upload the public key. If that fails, the run prints the command instead of creating a new key.
-- **`~/.gitconfig-<alias>`** – compared setting by setting against what the account line now produces. Every difference is printed before it's applied, e.g.:
+- **`~/.gitconfig-<alias>`** – compared setting by setting against what the account now produces. Every difference is printed before it's applied, e.g.:
   ```
   ~ user.name: Old Name -> New Name
   + credential.https://github.com.username = new-handle
   - core.sshcommand (was: ssh -i ...)
   ```
-- **`includeIf` entries** – if `project_folder` changes, the entry is moved to the new path instead of adding a second, contradicting one. The old directory is reported under "Needs your attention" if it still exists on disk (repos in it keep using the old config until moved).
-- **Removed accounts** – deleting a line from `accounts.conf` does **not** delete anything by default, so the leftover `~/.gitconfig-<alias>` and `includeIf` entry are only reported for you to decide. Add `PRUNE=1` to remove them (SSH and GPG keys are never touched by prune – remove those by hand if no longer needed).
+- **`includeIf` entries** – if `folder` changes, the entry is moved to the new path instead of adding a second, contradicting one. The old directory is reported under "Needs your attention" if it still exists on disk (repos in it keep using the old config until moved).
+- **Removed accounts** – deleting an account from `accounts.conf` does **not** delete anything by default, so the leftover `~/.gitconfig-<alias>` and `includeIf` entry are only reported for you to decide. Add `PRUNE=1` to remove them (SSH and GPG keys are never touched by prune – remove those by hand if no longer needed).
 
   `PRUNE` only removes files whose first line is the script's marker for that alias, plus their `includeIf` entries. Hand-written configs and backups such as `~/.gitconfig-work.bak` stay and are counted as *unmanaged*. Configs from older versions get the marker on the next run.
 
@@ -258,6 +276,17 @@ passwd
 
 For HTTPS, no password or token ever ends up in a git config file – only the username does. The token is kept by the credential helper: in the system keychain/keyring (`osxkeychain`, `libsecret`, `manager`) or, with the `cache` fallback, in memory until the timeout expires. Avoid `credential.helper store`, which writes tokens in plain text to `~/.git-credentials`.
 
+
+## Line format
+
+Before the git-config format, `accounts.conf` had one line per account. Such files are still read; a file whose first entry is a `[section]` header is read as git-config, anything else as lines:
+
+```
+alias|hostname|ssh_user|project_folder|git_name|git_email[|https_user[|ssh_key_type]]
+    section.key = value
+```
+
+The fields match `host`, `sshUser`, `folder`, `name`, `email`, `httpsUser` and `sshKeyType` above; optional fields at the end can be left out, empty `ssh_user` means HTTPS only. Indented `section.key = value` lines below an account are its extra git settings. Both formats produce the same account configs, so switching only means rewriting `accounts.conf`.
 
 ### Git config in ~/.config/git
 
